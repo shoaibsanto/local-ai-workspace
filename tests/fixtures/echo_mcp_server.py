@@ -18,34 +18,28 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 
-
-async def _on_list_tools(ctx, params):
-    return types.ListToolsResult(
-        tools=[
-            types.Tool(
-                name="echo",
-                description="Echo back the provided text.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
-                },
-            )
-        ]
-    )
+server: Server = Server("echo-test-server", version="0.1.0")
 
 
-async def _on_call_tool(ctx, params: types.CallToolRequestParams):
-    text = (params.arguments or {}).get("text", "")
-    return types.CallToolResult(content=[types.TextContent(type="text", text=f"echo: {text}")])
+@server.list_tools()
+async def _on_list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="echo",
+            description="Echo back the provided text.",
+            inputSchema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        )
+    ]
 
 
-server: Server = Server(
-    "echo-test-server",
-    version="0.1.0",
-    on_list_tools=_on_list_tools,
-    on_call_tool=_on_call_tool,
-)
+@server.call_tool()
+async def _on_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    text = (arguments or {}).get("text", "")
+    return [types.TextContent(type="text", text=f"echo: {text}")]
 
 
 async def main() -> None:
