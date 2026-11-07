@@ -27,6 +27,17 @@ from local_ai_workspace.storage.paths import get_configured_data_root, get_data_
 def cmd_serve(args: argparse.Namespace) -> None:
     configure_logging(level=args.log_level)
 
+    # Fail fast with a clear, actionable message instead of starting in a
+    # broken state (unwritable data dir, dead secrets key, or a port
+    # someone else already has bound). See core/startup_checks.py.
+    from local_ai_workspace.core.startup_checks import StartupCheckError, run_all_startup_checks
+
+    try:
+        run_all_startup_checks(args.host, args.port)
+    except StartupCheckError as e:
+        print(f"Startup check failed:\n\n{e}\n", file=sys.stderr)
+        sys.exit(1)
+
     from local_ai_workspace.api.app import create_app
 
     app = create_app()

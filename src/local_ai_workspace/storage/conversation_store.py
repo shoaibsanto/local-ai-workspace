@@ -18,6 +18,7 @@ from pathlib import Path
 from local_ai_workspace.core.models import ConversationMeta, Message
 from local_ai_workspace.storage.json_store import (
     append_jsonl,
+    get_lock,
     read_json,
     read_jsonl,
     rewrite_jsonl_atomic,
@@ -32,6 +33,20 @@ def _meta_path(conversation_id: str) -> Path:
 
 def _messages_path(conversation_id: str) -> Path:
     return conversation_dir(conversation_id) / "messages.jsonl"
+
+
+def _conversation_lock(conversation_id: str):
+    """The single lock guarding every read-modify-write sequence against a
+    given conversation's files (meta.json AND messages.jsonl together --
+    add_message touches both). Keying by conversation id (not by individual
+    file path) is deliberate: add_message's "append message, then bump
+    message_count in meta" is one logical operation spanning both files, and
+    two concurrent add_message calls for the SAME conversation must be
+    fully serialized relative to each other, not just individually atomic
+    per file, or the message_count bump can race (both readers see the same
+    stale count, both write count+1, one increment is lost) even though
+    each file write itself never corrupts."""
+    return get_lock(f"conversation::{conversation_id}")
 
 
 def create_conversation(
@@ -53,6 +68,16 @@ def get_conversation_meta(conversation_id: str) -> ConversationMeta | None:
 
 
 def update_conversation_meta(conversation_id: str, **updates) -> ConversationMeta | None:
+    with _conversation_lock(conversation_id):
+        return _update_conversation_meta_locked(conversation_id, **updates)
+
+
+def _update_conversation_meta_locked(conversation_id: str, **updates) -> ConversationMeta | None:
+    """Same as update_conversation_meta but assumes the caller already holds
+    `_conversation_lock(conversation_id)` -- used internally by add_message
+    so the "read meta, bump count, write meta" sequence happens under the
+    SAME lock acquisition as the message append, not a second, separately
+    racy one."""
     meta = get_conversation_meta(conversation_id)
     if meta is None:
         return None
@@ -86,10 +111,20 @@ def delete_conversation(conversation_id: str) -> bool:
 
 
 def add_message(conversation_id: str, message: Message) -> Message:
-    append_jsonl(_messages_path(conversation_id), message.model_dump())
-    meta = get_conversation_meta(conversation_id)
-    if meta is not None:
-        update_conversation_meta(conversation_id, message_count=meta.message_count + 1)
+    """Append `message` to the conversation and bump message_count.
+
+    Holds the conversation's lock for the whole append+bump sequence: two
+    concurrent add_message calls for the same conversation (e.g. two tool
+    results landing back-to-back in the agent loop, or a user message and a
+    stray duplicate retry) must never interleave their "read count / write
+    count+1" halves, or one increment is silently lost even though each
+    individual file write is atomic on its own.
+    """
+    with _conversation_lock(conversation_id):
+        append_jsonl(_messages_path(conversation_id), message.model_dump())
+        meta = get_conversation_meta(conversation_id)
+        if meta is not None:
+            _update_conversation_meta_locked(conversation_id, message_count=meta.message_count + 1)
     return message
 
 
@@ -99,9 +134,12 @@ def get_messages(conversation_id: str) -> list[Message]:
 
 
 def replace_messages(conversation_id: str, messages: list[Message]) -> None:
-    """Used for edit-and-resend (truncate history) and regenerate."""
-    rewrite_jsonl_atomic(_messages_path(conversation_id), [m.model_dump() for m in messages])
-    update_conversation_meta(conversation_id, message_count=len(messages))
+    """Used for edit-and-resend (truncate history) and regenerate. Holds the
+    conversation lock for the whole rewrite+meta-update sequence for the
+    same reason as add_message."""
+    with _conversation_lock(conversation_id):
+        rewrite_jsonl_atomic(_messages_path(conversation_id), [m.model_dump() for m in messages])
+        _update_conversation_meta_locked(conversation_id, message_count=len(messages))
 
 
 def search_conversations(query: str) -> list[ConversationMeta]:

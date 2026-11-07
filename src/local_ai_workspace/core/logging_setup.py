@@ -58,6 +58,22 @@ class RedactionFilter(logging.Filter):
         return True
 
 
+class RequestIdFilter(logging.Filter):
+    """Attaches the current request's id (from api/app.py's ContextVar) to
+    every log record emitted while handling it, so `%(request_id)s` is
+    always available in the format string even for log lines emitted deep
+    inside storage/provider/MCP code with no direct access to the request."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from local_ai_workspace.api.app import _request_id_ctx
+
+            record.request_id = _request_id_ctx.get()
+        except Exception:  # noqa: BLE001 - must never break logging
+            record.request_id = "-"
+        return True
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure the root logger with: the redaction filter (applied before
     any handler formats a record), a rotating file handler writing to
@@ -66,17 +82,20 @@ def configure_logging(level: str = "INFO") -> None:
     root.setLevel(level.upper())
 
     redaction_filter = RedactionFilter()
+    request_id_filter = RequestIdFilter()
 
     log_path = logs_dir() / "application.log"
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s [req=%(request_id)s]: %(message)s"))
     file_handler.addFilter(redaction_filter)
+    file_handler.addFilter(request_id_filter)
 
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s [req=%(request_id)s]: %(message)s"))
     console_handler.addFilter(redaction_filter)
+    console_handler.addFilter(request_id_filter)
 
     # Replace any pre-existing handlers to avoid duplicate log lines if this
     # is called more than once (e.g. in tests).
