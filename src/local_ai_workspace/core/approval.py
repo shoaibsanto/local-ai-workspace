@@ -14,6 +14,7 @@ name; false positives: a read-only tool that happens to mention "update" in
 its docstring), and the policy model exists specifically so a user can
 override any tool's classification explicitly via per_tool_overrides.
 """
+
 from __future__ import annotations
 
 import json
@@ -42,9 +43,7 @@ _CONSEQUENTIAL_VERBS = (
     "execute",
     "drop",
 )
-_VERB_PATTERN = re.compile(
-    r"\b(" + "|".join(_CONSEQUENTIAL_VERBS) + r")(e?s|e?d|ing)?\b", re.IGNORECASE
-)
+_VERB_PATTERN = re.compile(r"\b(" + "|".join(_CONSEQUENTIAL_VERBS) + r")(e?s|e?d|ing)?\b", re.IGNORECASE)
 
 
 def classify_tool_risk(tool_name: str, description: str = "") -> RiskLevel:

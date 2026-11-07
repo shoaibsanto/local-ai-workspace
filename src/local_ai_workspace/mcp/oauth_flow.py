@@ -7,11 +7,12 @@ server on localhost for the duration of a single authorization, exactly
 like a CLI OAuth flow (gcloud, gh, etc.) — no public redirect URI, no
 mandatory account with us.
 """
+
 from __future__ import annotations
 
 import asyncio
 import webbrowser
-from typing import Callable
+from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
@@ -59,7 +60,7 @@ class OAuthCallbackServer:
         actual_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
         self.port = actual_port
         self._future = asyncio.get_event_loop().create_future()
-        return actual_port
+        return int(actual_port)
 
     async def wait_for_code(self, timeout: float = 300) -> tuple[str, str | None]:
         assert self._future is not None

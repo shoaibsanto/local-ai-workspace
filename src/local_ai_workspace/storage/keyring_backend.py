@@ -7,9 +7,11 @@ service running (the common case for this app, e.g. servers/containers),
 `keyring` raises -- we catch that and let the caller fall back to the
 existing file-based key in storage/secrets.py. Never crashes the app.
 """
+
 from __future__ import annotations
 
 import logging
+from types import ModuleType
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +19,9 @@ SERVICE_NAME = "local-ai-workspace"
 KEY_USERNAME = "fernet-master-key"
 
 
-def _get_keyring_module():
+def _get_keyring_module() -> ModuleType | None:
     try:
-        import keyring  # type: ignore
+        import keyring
 
         return keyring
     except ImportError:
@@ -36,9 +38,7 @@ def is_keyring_available() -> bool:
         # The "fail" backend (keyring.backends.fail.Keyring) is returned when
         # no real backend is usable (e.g. headless Linux, no Secret Service).
         backend_name = type(backend).__module__ + "." + type(backend).__name__
-        if "fail" in backend_name.lower():
-            return False
-        return True
+        return "fail" not in backend_name.lower()
     except Exception:  # noqa: BLE001 - any keyring probing failure means "unavailable"
         return False
 
@@ -53,7 +53,7 @@ def get_key() -> bytes | None:
         value = kr.get_password(SERVICE_NAME, KEY_USERNAME)
         if value is None:
             return None
-        return value.encode("utf-8")
+        return str(value).encode("utf-8")
     except Exception as e:  # noqa: BLE001 - keyring backends raise all sorts of things
         logger.warning("Keyring read failed, falling back to file-based key: %s", e)
         return None

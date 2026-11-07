@@ -20,10 +20,12 @@ Gemini differences handled here:
     merge token-by-token) -- each chunk's candidate parts are emitted
     directly as our StreamEvent text/tool_call events as they arrive.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -133,9 +135,7 @@ class GeminiClient:
     async def list_models(self) -> list[str]:
         validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{self.base_url}/models", headers=self._headers(), params=self._params()
-            )
+            resp = await client.get(f"{self.base_url}/models", headers=self._headers(), params=self._params())
             resp.raise_for_status()
             data = resp.json()
             names = []
@@ -169,59 +169,59 @@ class GeminiClient:
 
         try:
             validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                async with client.stream(
+            async with (
+                httpx.AsyncClient(timeout=self.timeout_seconds) as client,
+                client.stream(
                     "POST",
                     url,
                     headers=self._headers(),
                     params=params,
                     json=payload,
-                ) as resp:
-                    if resp.status_code >= 400:
-                        body = await resp.aread()
-                        raise ProviderError(
-                            f"HTTP {resp.status_code}: {body.decode(errors='replace')[:500]}"
-                        )
-                    usage: dict[str, int] | None = None
-                    finish_reason: str | None = None
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data_str = line[len("data:") :].strip()
-                        if not data_str:
-                            continue
-                        try:
-                            chunk = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
+                ) as resp,
+            ):
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise ProviderError(f"HTTP {resp.status_code}: {body.decode(errors='replace')[:500]}")
+                usage: dict[str, int] | None = None
+                finish_reason: str | None = None
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:") :].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
 
-                        for candidate in chunk.get("candidates", []):
-                            content = candidate.get("content", {})
-                            for part in content.get("parts", []):
-                                if "text" in part and part["text"]:
-                                    yield StreamEvent(type="text_delta", text=part["text"])
-                                if "functionCall" in part:
-                                    fc = part["functionCall"]
-                                    yield StreamEvent(
-                                        type="tool_call",
-                                        tool_call=ToolCall(
-                                            id=f"call_{fc.get('name', 'fn')}",
-                                            name=fc.get("name", ""),
-                                            arguments=fc.get("args", {}) or {},
-                                        ),
-                                    )
-                            if candidate.get("finishReason"):
-                                finish_reason = candidate["finishReason"]
+                    for candidate in chunk.get("candidates", []):
+                        content = candidate.get("content", {})
+                        for part in content.get("parts", []):
+                            if "text" in part and part["text"]:
+                                yield StreamEvent(type="text_delta", text=part["text"])
+                            if "functionCall" in part:
+                                fc = part["functionCall"]
+                                yield StreamEvent(
+                                    type="tool_call",
+                                    tool_call=ToolCall(
+                                        id=f"call_{fc.get('name', 'fn')}",
+                                        name=fc.get("name", ""),
+                                        arguments=fc.get("args", {}) or {},
+                                    ),
+                                )
+                        if candidate.get("finishReason"):
+                            finish_reason = candidate["finishReason"]
 
-                        if chunk.get("usageMetadata"):
-                            um = chunk["usageMetadata"]
-                            usage = {
-                                "prompt_tokens": um.get("promptTokenCount", 0),
-                                "completion_tokens": um.get("candidatesTokenCount", 0),
-                                "total_tokens": um.get("totalTokenCount", 0),
-                            }
+                    if chunk.get("usageMetadata"):
+                        um = chunk["usageMetadata"]
+                        usage = {
+                            "prompt_tokens": um.get("promptTokenCount", 0),
+                            "completion_tokens": um.get("candidatesTokenCount", 0),
+                            "total_tokens": um.get("totalTokenCount", 0),
+                        }
 
-                    yield StreamEvent(type="done", finish_reason=finish_reason, usage=usage)
+                yield StreamEvent(type="done", finish_reason=finish_reason, usage=usage)
         except httpx.HTTPError as e:
             yield StreamEvent(type="error", error=str(e))
         except ProviderError as e:

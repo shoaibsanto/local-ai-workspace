@@ -3,14 +3,20 @@
 Kept deliberately small (argparse, no extra CLI framework dependency) since
 the whole point of this app is to minimize what gets installed.
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import socket
 import sys
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 
 import uvicorn
 
@@ -20,6 +26,17 @@ from local_ai_workspace.storage.paths import get_configured_data_root, get_data_
 
 def cmd_serve(args: argparse.Namespace) -> None:
     configure_logging(level=args.log_level)
+
+    # Fail fast with a clear, actionable message instead of starting in a
+    # broken state (unwritable data dir, dead secrets key, or a port
+    # someone else already has bound). See core/startup_checks.py.
+    from local_ai_workspace.core.startup_checks import StartupCheckError, run_all_startup_checks
+
+    try:
+        run_all_startup_checks(args.host, args.port)
+    except StartupCheckError as e:
+        print(f"Startup check failed:\n\n{e}\n", file=sys.stderr)
+        sys.exit(1)
 
     from local_ai_workspace.api.app import create_app
 
@@ -99,8 +116,7 @@ def cmd_export(args: argparse.Namespace) -> None:
 def cmd_wipe(args: argparse.Namespace) -> None:
     if not args.confirm:
         print(
-            "Refusing to wipe all data without --confirm. "
-            "Re-run as: local-ai wipe --confirm",
+            "Refusing to wipe all data without --confirm. Re-run as: local-ai wipe --confirm",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -131,16 +147,161 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         secrets_path().unlink()
     if secret_key_path().exists():
         secret_key_path().unlink()
-    try:
+    with contextlib.suppress(Exception):  # best-effort cleanup only
         keyring_backend.delete_key()
-    except Exception:  # noqa: BLE001 - best-effort cleanup only
-        pass
 
     print("All data wiped: conversations, projects, providers, MCP servers, secrets.")
 
 
+def _get_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("local-ai-workspace")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+class CheckStatus(Enum):
+    """Severity of a single `local-ai doctor` check."""
+
+    PASS = "PASS"
+    WARN = "WARN"
+    FAIL = "FAIL"
+
+
+@dataclass
+class CheckResult:
+    name: str
+    status: CheckStatus
+    detail: str
+
+
+_MIN_PYTHON = (3, 11)
+
+
+def _check_python_version() -> CheckResult:
+    actual = sys.version_info[:2]
+    if actual >= _MIN_PYTHON:
+        return CheckResult(
+            "Python version",
+            CheckStatus.PASS,
+            f"{sys.version.split()[0]} (>= {'.'.join(map(str, _MIN_PYTHON))} required)",
+        )
+    return CheckResult(
+        "Python version",
+        CheckStatus.FAIL,
+        f"{sys.version.split()[0]} is below the minimum supported {'.'.join(map(str, _MIN_PYTHON))}",
+    )
+
+
+def _check_data_dir() -> CheckResult:
+    try:
+        root = get_data_root()
+    except OSError as e:
+        return CheckResult("Data directory", CheckStatus.FAIL, f"could not resolve/create data root: {e}")
+
+    if not root.exists():
+        return CheckResult("Data directory", CheckStatus.FAIL, f"{root} does not exist")
+
+    probe = root / ".doctor_write_check"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        return CheckResult("Data directory", CheckStatus.FAIL, f"{root} exists but is not writable: {e}")
+
+    return CheckResult("Data directory", CheckStatus.PASS, f"{root} exists and is writable")
+
+
+def _check_frontend_static() -> CheckResult:
+    static_dir = Path(__file__).resolve().parent.parent / "static"
+    if not static_dir.exists():
+        return CheckResult(
+            "Frontend static assets",
+            CheckStatus.WARN,
+            f"{static_dir} is missing — this is expected for an editable/dev install "
+            "before the frontend has been built (see frontend/README.md); "
+            "`local-ai serve` will run API-only without a bundled UI",
+        )
+    if not any(static_dir.iterdir()):
+        return CheckResult("Frontend static assets", CheckStatus.WARN, f"{static_dir} exists but is empty")
+    return CheckResult("Frontend static assets", CheckStatus.PASS, f"{static_dir} present")
+
+
+def _check_port_free(host: str, port: int) -> CheckResult:
+    """Best-effort check: a bind-and-close probe. Inherently racy (TOCTOU)
+    against whatever actually calls `uvicorn.run` later, so this is reported
+    as a WARN rather than FAIL on conflict — it's informational, not a hard
+    gate, since the real bind attempt at `serve` time is authoritative."""
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            return CheckResult(
+                f"Port {port} availability",
+                CheckStatus.WARN,
+                f"{host}:{port} appears to be in use ({e}); `local-ai serve --port <other>` to pick a different one",
+            )
+    return CheckResult(f"Port {port} availability", CheckStatus.PASS, f"{host}:{port} is free")
+
+
+def _check_secrets_master_key() -> CheckResult:
+    try:
+        from local_ai_workspace.storage.secrets import _get_or_create_key
+
+        key = _get_or_create_key()
+    except Exception as e:  # noqa: BLE001 - doctor must never crash on a broken key backend
+        return CheckResult("Secrets master key", CheckStatus.FAIL, f"could not load/create master key: {e}")
+
+    if not key:
+        return CheckResult("Secrets master key", CheckStatus.FAIL, "master key resolved to an empty value")
+
+    from local_ai_workspace.storage import keyring_backend
+
+    backend = keyring_backend.backend_description() if keyring_backend.is_keyring_available() else "file-based"
+    return CheckResult("Secrets master key", CheckStatus.PASS, f"loadable via {backend}")
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    checks = [
+        _check_python_version(),
+        _check_data_dir(),
+        _check_frontend_static(),
+        _check_port_free(args.host, args.port),
+        _check_secrets_master_key(),
+    ]
+
+    print("local-ai doctor")
+    print("=" * 60)
+    worst = CheckStatus.PASS
+    for result in checks:
+        print(f"[{result.status.value:4}] {result.name}: {result.detail}")
+        if result.status == CheckStatus.FAIL:
+            worst = CheckStatus.FAIL
+        elif result.status == CheckStatus.WARN and worst != CheckStatus.FAIL:
+            worst = CheckStatus.WARN
+    print("=" * 60)
+
+    if worst == CheckStatus.FAIL:
+        print("Result: FAIL — one or more checks failed, see above.")
+        sys.exit(1)
+    elif worst == CheckStatus.WARN:
+        print("Result: PASS with warnings.")
+        sys.exit(0)
+    else:
+        print("Result: PASS — all checks OK.")
+        sys.exit(0)
+
+
 def app() -> None:
     parser = argparse.ArgumentParser(prog="local-ai", description="Local-first AI workspace")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"local-ai-workspace {_get_version()}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve_p = sub.add_parser("serve", help="Start the local server and open the UI")
@@ -172,10 +333,13 @@ def app() -> None:
     export_p.set_defaults(func=cmd_export)
 
     wipe_p = sub.add_parser("wipe", help="Delete ALL app data (conversations, providers, MCP servers, secrets)")
-    wipe_p.add_argument(
-        "--confirm", action="store_true", help="Required flag to actually perform the wipe"
-    )
+    wipe_p.add_argument("--confirm", action="store_true", help="Required flag to actually perform the wipe")
     wipe_p.set_defaults(func=cmd_wipe)
+
+    doctor_p = sub.add_parser("doctor", help="Diagnose environment/config issues (data dir, port, secrets, frontend)")
+    doctor_p.add_argument("--host", default="127.0.0.1", help="Host to probe for port availability")
+    doctor_p.add_argument("--port", type=int, default=8420, help="Port to probe for availability")
+    doctor_p.set_defaults(func=cmd_doctor)
 
     args = parser.parse_args()
     args.func(args)

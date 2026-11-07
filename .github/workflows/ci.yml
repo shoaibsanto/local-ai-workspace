@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        # No uv.lock is committed (pyproject.toml uses plain >=X,<Y ranges,
+        # not a locked resolution) -- enable-cache would try to key its
+        # cache off a lockfile that doesn't exist, so it's left off here.
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Create venv and install project (with dev deps)
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/ -v
+
+      - name: Ruff lint
+        run: |
+          source .venv/bin/activate
+          ruff check src/ tests/
+
+      - name: Ruff format check
+        run: |
+          source .venv/bin/activate
+          ruff format --check src/ tests/
+
+      - name: mypy
+        run: |
+          source .venv/bin/activate
+          mypy src/local_ai_workspace
+
+  frontend:
+    name: Frontend (node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build

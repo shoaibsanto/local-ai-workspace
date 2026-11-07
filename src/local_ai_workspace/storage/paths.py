@@ -33,6 +33,7 @@ Layout (under the data root):
     logs/
         application.log         rotating application log
 """
+
 from __future__ import annotations
 
 import json
@@ -60,7 +61,7 @@ def get_configured_data_root() -> str | None:
     if not path.exists():
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         value = data.get("data_root")
         return str(value) if value else None
@@ -75,7 +76,7 @@ def set_configured_data_root(path: str | None) -> None:
     data: dict = {}
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             data = {}

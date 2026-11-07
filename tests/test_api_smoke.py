@@ -2,9 +2,8 @@
 just verifying the app wires up and the filesystem persistence layer works.
 Run with: pytest
 """
-from __future__ import annotations
 
-import os
+from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient

@@ -11,8 +11,10 @@ reading the file), not against an attacker with root/your user account.
 
 No secret ever leaves the machine and no secret is logged.
 """
+
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import stat
@@ -21,7 +23,6 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from local_ai_workspace.storage import keyring_backend
-from local_ai_workspace.storage.json_store import read_json, write_json_atomic
 from local_ai_workspace.storage.paths import secret_key_path, secrets_path
 
 logger = logging.getLogger(__name__)
@@ -66,10 +67,8 @@ def _get_or_create_key() -> bytes:
         return key_path.read_bytes()
     key = Fernet.generate_key()
     key_path.write_bytes(key)
-    try:
+    with contextlib.suppress(OSError):  # best-effort on platforms without POSIX permission bits
         os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass  # best-effort on platforms without POSIX permission bits
     return key
 
 
@@ -87,7 +86,8 @@ def load_secrets() -> dict[str, Any]:
         decrypted = _fernet().decrypt(encrypted)
         import json
 
-        return json.loads(decrypted.decode("utf-8"))
+        result: dict[str, Any] = json.loads(decrypted.decode("utf-8"))
+        return result
     except (InvalidToken, ValueError, OSError):
         return {}
 
@@ -100,10 +100,8 @@ def save_secrets(data: dict[str, Any]) -> None:
     path = secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(encrypted)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
 
 
 def get_secret(key: str) -> str | None:

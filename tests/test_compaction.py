@@ -1,4 +1,5 @@
 """Tests for context compaction (core/compaction.py)."""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +13,6 @@ from local_ai_workspace.core.compaction import (
     get_summary,
     should_compact,
 )
-
 
 # ---------- should_compact threshold logic ----------
 
@@ -153,7 +153,7 @@ async def test_compact_keeps_old_summary_when_update_fails(monkeypatch, tmp_path
     from local_ai_workspace.storage import conversation_store
 
     meta = conversation_store.create_conversation(title="t", model="m", provider="p")
-    msg1 = conversation_store.add_message(meta.id, Message(role="user", content="first"))
+    conversation_store.add_message(meta.id, Message(role="user", content="first"))
 
     class FakeStreamEvent:
         def __init__(self, type, text=None, error=None):

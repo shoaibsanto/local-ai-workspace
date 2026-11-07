@@ -26,6 +26,7 @@ OAuthToken JSON object (no wrapper) is handled as a legacy shape with an
 unknown expiry (treated as "not expired" since we have no information to
 say otherwise, and connect() will simply discover 401s the normal way).
 """
+
 from __future__ import annotations
 
 import json

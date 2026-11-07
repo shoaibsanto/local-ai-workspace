@@ -1,4 +1,5 @@
 """MCP server configuration persistence (non-secret fields only)."""
+
 from __future__ import annotations
 
 from local_ai_workspace.core.models import MCPServerConfig

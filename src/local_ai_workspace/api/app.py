@@ -3,24 +3,29 @@
 Binds to 127.0.0.1 only by default (see cli/main.py) — this is a local
 desktop app, not a service meant to be exposed on the network.
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from local_ai_workspace.core.approval import ApprovalPolicy
 from local_ai_workspace.core.chat import ChatOrchestrator
 from local_ai_workspace.core.compaction import get_summary
 from local_ai_workspace.core.models import MCPServerConfig, ProjectMeta, ProviderConfig
-from local_ai_workspace.mcp.manager import MCPManager, OAuthDiscoveryError
+from local_ai_workspace.core.rate_limit import chat_rate_limiter
+from local_ai_workspace.mcp.manager import MCPManager
 from local_ai_workspace.providers.capabilities import detect_capabilities
 from local_ai_workspace.providers.client import make_client
 from local_ai_workspace.storage import conversation_store
@@ -33,7 +38,6 @@ from local_ai_workspace.storage.mcp_store import (
 )
 from local_ai_workspace.storage.paths import (
     conversations_dir,
-    get_data_root,
     mcp_servers_path,
     projects_dir,
     providers_path,
@@ -50,10 +54,44 @@ from local_ai_workspace.storage.provider_store import (
 from local_ai_workspace.storage.secrets import delete_secret, get_secret, set_secret
 from local_ai_workspace.storage.settings_store import (
     get_approval_policy,
+    get_settings,
     save_approval_policy,
 )
 
 logger = logging.getLogger(__name__)
+
+# Request bodies larger than this are rejected with 413 before being read
+# into memory in full -- a misbehaving/malicious client sending a huge body
+# (e.g. a multi-GB "chat message") should not be able to exhaust process
+# memory just by POSTing. 10MB comfortably covers any legitimate chat
+# message or small file upload through this API; the one genuinely large
+# upload endpoint (/api/admin/restore) is exempted below since backups are
+# expected to be larger than a chat message.
+MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+
+# Per-request id, used so log records emitted anywhere during a request's
+# lifetime (e.g. inside storage/provider/MCP code, deep in the call stack)
+# can be correlated back to the HTTP request without threading a parameter
+# through every function signature. Read by core/logging_setup.py's filter.
+_request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
+
+
+class _RequestTooLarge(Exception):
+    """Raised internally when a streamed (no Content-Length) request body
+    crosses MAX_REQUEST_BODY_BYTES while being read; caught by the size-limit
+    middleware and converted into a clean 413 response."""
+
+
+def _too_large_response(request: Request) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "-")
+    return JSONResponse(
+        status_code=413,
+        content={
+            "error": "request_too_large",
+            "detail": f"Request body exceeds the {MAX_REQUEST_BODY_BYTES} byte limit.",
+            "request_id": request_id,
+        },
+    )
 
 
 class CreateConversationBody(BaseModel):
@@ -153,6 +191,102 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Local AI Workspace", lifespan=lifespan)
+
+    # ---------- Global exception handling ----------
+    # Any unhandled exception must never leak a stack trace or internal file
+    # path to the HTTP response body. Log the full traceback server-side
+    # (redaction-aware logger) keyed by request id, and return a generic
+    # safe JSON body with that same request id so a user-reported error can
+    # be correlated to server logs without exposing internals.
+    @app.exception_handler(Exception)
+    async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "-")
+        logger.error(
+            "Unhandled exception while processing %s %s (request_id=%s)",
+            request.method,
+            request.url.path,
+            request_id,
+            exc_info=exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "internal_error", "request_id": request_id},
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Preserve FastAPI/Starlette's normal HTTPException behavior (404s,
+        # validation 4xxs raised intentionally by route handlers via
+        # `raise HTTPException(...)`) but still attach the request id for
+        # correlation, instead of falling through to the generic 500 handler.
+        request_id = getattr(request.state, "request_id", "-")
+        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={**detail, "request_id": request_id},
+            headers=exc.headers,
+        )
+
+    # ---------- Request-id correlation ----------
+    # Every request gets a UUID, attached to request.state (for handlers /
+    # exception handlers to read), echoed back as an X-Request-Id response
+    # header, and included in log records emitted while handling it -- so a
+    # user-reported error can be correlated to the exact log lines server
+    # side without ever putting a stack trace in the HTTP response.
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+        token = _request_id_ctx.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            _request_id_ctx.reset(token)
+        response.headers["X-Request-Id"] = request_id
+        return response
+
+    # ---------- Request size limit ----------
+    # Reject oversized request bodies with a clean 413 before any handler
+    # reads them into memory, so a misbehaving/malicious client can't
+    # exhaust process memory just by POSTing a huge body. Checked against
+    # Content-Length up front (cheap, no body read) when present; as a
+    # backstop for chunked/streamed bodies with no Content-Length, the
+    # actual bytes are also counted as they're consumed.
+    @app.middleware("http")
+    async def limit_request_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > MAX_REQUEST_BODY_BYTES:
+                return _too_large_response(request)
+
+        if content_length is None and request.method in ("POST", "PUT", "PATCH"):
+            # No Content-Length (e.g. chunked transfer-encoding): wrap the
+            # receive channel to count bytes as they stream in and abort
+            # early if the running total crosses the limit, rather than
+            # buffering an unbounded body first.
+            original_receive = request.receive
+            total = 0
+
+            async def counting_receive():
+                nonlocal total
+                message = await original_receive()
+                if message.get("type") == "http.request":
+                    total += len(message.get("body") or b"")
+                    if total > MAX_REQUEST_BODY_BYTES:
+                        raise _RequestTooLarge()
+                return message
+
+            request._receive = counting_receive
+            try:
+                return await call_next(request)
+            except _RequestTooLarge:
+                return _too_large_response(request)
+
+        return await call_next(request)
 
     # ---------- Origin / CSRF protection ----------
     # Reject any non-GET request whose Origin header (when present) isn't an
@@ -261,8 +395,20 @@ def create_app() -> FastAPI:
 
     # ---------- Chat streaming (SSE) ----------
 
+    def _check_chat_rate_limit(conversation_id: str) -> None:
+        limit = get_settings().chat_rate_limit_per_minute
+        if not chat_rate_limiter.allow(conversation_id, limit):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Rate limit exceeded for this conversation "
+                    f"({limit} requests/minute). Please wait before sending more messages."
+                ),
+            )
+
     @app.post("/api/conversations/{conversation_id}/chat")
     async def api_chat(conversation_id: str, body: ChatBody):
+        _check_chat_rate_limit(conversation_id)
         content = body.content
         orchestrator: ChatOrchestrator = app.state.orchestrator
 
@@ -274,13 +420,12 @@ def create_app() -> FastAPI:
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.post("/api/conversations/{conversation_id}/tool_calls/{tool_call_id}/resume")
-    async def api_resume_tool_approval(
-        conversation_id: str, tool_call_id: str, body: ResumeToolApprovalBody
-    ):
+    async def api_resume_tool_approval(conversation_id: str, tool_call_id: str, body: ResumeToolApprovalBody):
         """Resume an agent loop that paused on an approval_required event
         for `tool_call_id`: execute it (approved=true) or skip it
         (approved=false), then continue the loop. Streams the same SSE
         event shapes as /chat."""
+        _check_chat_rate_limit(conversation_id)
         orchestrator: ChatOrchestrator = app.state.orchestrator
 
         async def event_stream():
@@ -359,9 +504,7 @@ def create_app() -> FastAPI:
                     err = event.error or ""
                     latency_ms = (_time.monotonic() - start) * 1000
                     if "401" in err or "403" in err:
-                        return TestConnectionResult(
-                            ok=False, latency_ms=latency_ms, error=f"Invalid API key: {err}"
-                        )
+                        return TestConnectionResult(ok=False, latency_ms=latency_ms, error=f"Invalid API key: {err}")
                     if "404" in err or "400" in err:
                         return TestConnectionResult(
                             ok=False,
@@ -495,9 +638,7 @@ def create_app() -> FastAPI:
         on this server. Disabled tools are skipped by
         MCPManager.get_tools_openai_format and refused by call_tool."""
         try:
-            updated = app.state.mcp_manager.set_tool_enabled(
-                server_id, body.tool_name, body.enabled
-            )
+            updated = app.state.mcp_manager.set_tool_enabled(server_id, body.tool_name, body.enabled)
         except ValueError as e:
             raise HTTPException(404, str(e)) from e
         return updated.model_dump()
@@ -537,9 +678,7 @@ def create_app() -> FastAPI:
         if provider_cfg is None:
             raise HTTPException(400, "Provider not configured")
         api_key = get_secret(provider_cfg.api_key_ref) if provider_cfg.api_key_ref else None
-        client = make_client(
-            provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local
-        )
+        client = make_client(provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local)
         summary = await compact(conversation_id, client, meta.model)
         return summary.model_dump()
 
@@ -572,7 +711,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/restore")
     async def api_restore_backup(
-        path: str | None = None, file: UploadFile | None = File(default=None)
+        path: str | None = None,
+        file: UploadFile | None = File(None),  # noqa: B008 - FastAPI's own idiom: File()/Depends() must live in the signature default to be recognized as a dependency
     ):
         """Restore from a backup. Either pass `path` (a path to an existing
         backup archive on disk) as a query/form param, or upload the backup

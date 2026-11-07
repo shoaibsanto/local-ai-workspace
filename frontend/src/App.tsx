@@ -1,15 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Composer } from './components/Composer'
 import { MessageBubble } from './components/MessageBubble'
-import { SettingsModal } from './components/SettingsModal'
-import { McpModal } from './components/McpModal'
-import { ApprovalModal } from './components/ApprovalModal'
-import { CommandPalette } from './components/CommandPalette'
-import { ShortcutsHelp } from './components/ShortcutsHelp'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { Spinner } from './components/Spinner'
 import { api, streamChat, type ChatEvent, type Message, type ProviderConfig, type ToolCall } from './lib/api'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import { Sparkles, Menu } from 'lucide-react'
+
+// Modals are only ever needed after a user action (never on initial paint), so
+// they're split into separate chunks and loaded on demand via React.lazy.
+const SettingsModal = lazy(() => import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal })))
+const McpModal = lazy(() => import('./components/McpModal').then((m) => ({ default: m.McpModal })))
+const ApprovalModal = lazy(() => import('./components/ApprovalModal').then((m) => ({ default: m.ApprovalModal })))
+const CommandPalette = lazy(() => import('./components/CommandPalette').then((m) => ({ default: m.CommandPalette })))
+const ShortcutsHelp = lazy(() => import('./components/ShortcutsHelp').then((m) => ({ default: m.ShortcutsHelp })))
+
+function ModalFallback() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/50">
+      <Spinner size={24} className="text-neutral-500 dark:text-neutral-300" />
+    </div>
+  )
+}
 
 const SUGGESTED_PROMPTS = [
   'Summarize the key ideas from a long article I paste in',
@@ -277,29 +290,42 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="py-4">
-              {messages.map((m, i) => (
-                <MessageBubble
-                  key={m.id}
-                  message={m}
-                  onRegenerate={m.role === 'assistant' && i === messages.length - 1 ? handleRegenerate : undefined}
-                  onEdit={m.role === 'user' ? (nc) => handleEdit(i, nc) : undefined}
-                />
-              ))}
-              {isStreaming && streamingText && (
-                <MessageBubble
-                  message={{
-                    id: 'streaming',
-                    role: 'assistant',
-                    content: streamingText,
-                    tool_calls: [],
-                    tool_results: [],
-                    created_at: Date.now() / 1000,
-                  }}
-                  isStreaming
-                />
+            // Broader boundary around the whole message-rendering region: if
+            // something outside an individual MessageBubble's own boundary
+            // still throws, the sidebar/composer stay interactive and only
+            // this region falls back.
+            <ErrorBoundary
+              label="MessageList"
+              fallback={() => (
+                <div className="mx-auto w-full max-w-3xl px-4 py-6 text-sm text-neutral-500 dark:text-neutral-400">
+                  Couldn't render the conversation. Try starting a new chat.
+                </div>
               )}
-            </div>
+            >
+              <div className="py-4">
+                {messages.map((m, i) => (
+                  <MessageBubble
+                    key={m.id}
+                    message={m}
+                    onRegenerate={m.role === 'assistant' && i === messages.length - 1 ? handleRegenerate : undefined}
+                    onEdit={m.role === 'user' ? (nc) => handleEdit(i, nc) : undefined}
+                  />
+                ))}
+                {isStreaming && streamingText && (
+                  <MessageBubble
+                    message={{
+                      id: 'streaming',
+                      role: 'assistant',
+                      content: streamingText,
+                      tool_calls: [],
+                      tool_results: [],
+                      created_at: Date.now() / 1000,
+                    }}
+                    isStreaming
+                  />
+                )}
+              </div>
+            </ErrorBoundary>
           )}
         </div>
 
@@ -321,31 +347,45 @@ export default function App() {
       </div>
 
       {settingsOpen && (
-        <SettingsModal
-          onClose={() => {
-            setSettingsOpen(false)
-            api.listProviders().then(setProviders)
-          }}
-        />
+        <Suspense fallback={<ModalFallback />}>
+          <SettingsModal
+            onClose={() => {
+              setSettingsOpen(false)
+              api.listProviders().then(setProviders)
+            }}
+          />
+        </Suspense>
       )}
       {mcpOpen && (
-        <McpModal
-          onClose={() => {
-            setMcpOpen(false)
-            api.listMcpTools().then((t) => setToolCount(t.length)).catch(() => {})
-          }}
-        />
+        <Suspense fallback={<ModalFallback />}>
+          <McpModal
+            onClose={() => {
+              setMcpOpen(false)
+              api.listMcpTools().then((t) => setToolCount(t.length)).catch(() => {})
+            }}
+          />
+        </Suspense>
       )}
-      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} onSelect={loadConversation} />}
-      {shortcutsOpen && <ShortcutsHelp onClose={() => setShortcutsOpen(false)} />}
+      {paletteOpen && (
+        <Suspense fallback={<ModalFallback />}>
+          <CommandPalette onClose={() => setPaletteOpen(false)} onSelect={loadConversation} />
+        </Suspense>
+      )}
+      {shortcutsOpen && (
+        <Suspense fallback={<ModalFallback />}>
+          <ShortcutsHelp onClose={() => setShortcutsOpen(false)} />
+        </Suspense>
+      )}
       {pendingApproval && (
-        <ApprovalModal
-          conversationId={pendingApproval.conversationId}
-          toolCall={pendingApproval.toolCall}
-          serverName={pendingApproval.serverName}
-          riskLevel={pendingApproval.riskLevel}
-          onResolved={(approved) => resumeStreamRef.current?.(approved)}
-        />
+        <Suspense fallback={<ModalFallback />}>
+          <ApprovalModal
+            conversationId={pendingApproval.conversationId}
+            toolCall={pendingApproval.toolCall}
+            serverName={pendingApproval.serverName}
+            riskLevel={pendingApproval.riskLevel}
+            onResolved={(approved) => resumeStreamRef.current?.(approved)}
+          />
+        </Suspense>
       )}
     </div>
   )

@@ -1,4 +1,5 @@
 """Pydantic data models shared across the app."""
+
 from __future__ import annotations
 
 import time
@@ -105,9 +106,7 @@ class MCPServerConfig(BaseModel):
     requires_oauth: bool = False
     oauth_token_ref: str | None = None  # key name in secrets store
     enabled: bool = True
-    status: Literal["disconnected", "connecting", "connected", "error", "needs_auth"] = (
-        "disconnected"
-    )
+    status: Literal["disconnected", "connecting", "connected", "error", "needs_auth"] = "disconnected"
     last_error: str | None = None
     tool_count: int = 0
     allow_local: bool = False  # opt-in: skip SSRF guard for local MCP endpoints
