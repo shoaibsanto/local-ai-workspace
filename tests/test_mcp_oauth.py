@@ -1,4 +1,5 @@
 """Tests for MCP OAuth token isolation and per-tool enable/disable."""
+
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
@@ -8,7 +9,6 @@ import pytest
 from local_ai_workspace.core.models import MCPServerConfig
 from local_ai_workspace.mcp.manager import ConnectedServer, MCPManager
 from local_ai_workspace.mcp.oauth_storage import EncryptedFileTokenStorage
-
 
 # ---------- token isolation between two servers ----------
 
@@ -65,6 +65,7 @@ async def test_raw_secrets_store_has_no_cross_server_keys(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCAL_AI_WORKSPACE_HOME", str(tmp_path))
 
     from mcp.shared.auth import OAuthToken
+
     from local_ai_workspace.storage.secrets import load_secrets
 
     storage_a = EncryptedFileTokenStorage("server-a")
@@ -107,9 +108,7 @@ def _make_connection(server_id: str, name: str, tool_names: list[str], disabled:
 
 def test_get_tools_openai_format_skips_disabled_tools():
     manager = MCPManager()
-    conn = _make_connection(
-        "srv_1", "myserver", ["list_files", "delete_file"], disabled=["delete_file"]
-    )
+    conn = _make_connection("srv_1", "myserver", ["list_files", "delete_file"], disabled=["delete_file"])
     manager._connections["srv_1"] = conn
 
     tools = manager.get_tools_openai_format()

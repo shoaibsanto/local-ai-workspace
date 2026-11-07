@@ -2,6 +2,7 @@
 gating behavior in the chat orchestrator, Gemini message-format conversion,
 and the no-raw-key-leak guarantee across every provider-returning endpoint.
 """
+
 from __future__ import annotations
 
 import json
@@ -166,8 +167,7 @@ async def test_chat_orchestrator_withholds_tools_when_tool_calling_false(monkeyp
     from local_ai_workspace.core.chat import ChatOrchestrator
     from local_ai_workspace.core.models import ProviderConfig
     from local_ai_workspace.providers.client import StreamEvent
-    from local_ai_workspace.storage import conversation_store
-    from local_ai_workspace.storage import provider_store
+    from local_ai_workspace.storage import conversation_store, provider_store
 
     provider = ProviderConfig(
         name="NoTools",
@@ -184,9 +184,7 @@ async def test_chat_orchestrator_withholds_tools_when_tool_calling_false(monkeyp
     )
     provider_store.save_provider(provider)
 
-    meta = conversation_store.create_conversation(
-        title="t", model=provider.default_model, provider=provider.id
-    )
+    meta = conversation_store.create_conversation(title="t", model=provider.default_model, provider=provider.id)
 
     captured = {}
 
@@ -229,8 +227,7 @@ async def test_chat_orchestrator_permissive_when_capability_unset(monkeypatch, t
     from local_ai_workspace.core.chat import ChatOrchestrator
     from local_ai_workspace.core.models import ProviderConfig
     from local_ai_workspace.providers.client import StreamEvent
-    from local_ai_workspace.storage import conversation_store
-    from local_ai_workspace.storage import provider_store
+    from local_ai_workspace.storage import conversation_store, provider_store
 
     provider = ProviderConfig(
         name="UnknownCaps",
@@ -242,9 +239,7 @@ async def test_chat_orchestrator_permissive_when_capability_unset(monkeypatch, t
     )
     provider_store.save_provider(provider)
 
-    meta = conversation_store.create_conversation(
-        title="t", model=provider.default_model, provider=provider.id
-    )
+    meta = conversation_store.create_conversation(title="t", model=provider.default_model, provider=provider.id)
 
     captured = {}
 

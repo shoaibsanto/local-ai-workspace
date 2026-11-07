@@ -1,12 +1,17 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check, RefreshCw, Pencil, Wrench, AlertCircle } from 'lucide-react'
 import type { Message } from '../lib/api'
 import { cn } from '../lib/utils'
-import { useTheme } from '../lib/theme'
+import { ErrorBoundary } from './ErrorBoundary'
+import { Spinner } from './Spinner'
+
+// react-syntax-highlighter (Prism build) + its language grammars/themes are
+// one of the heaviest deps in this app. Load it lazily -- most messages never
+// contain a fenced code block on first paint, so it shouldn't ship in the
+// main entry chunk.
+const CodeBlock = lazy(() => import('./CodeBlock'))
 
 interface Props {
   message: Message
@@ -108,29 +113,44 @@ export function MessageBubble({ message, isStreaming, onRegenerate, onEdit }: Pr
             ) : isUser ? (
               <span className="whitespace-pre-wrap">{message.content}</span>
             ) : (
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  code({ className, children, ...props }) {
-                    const match = /language-(\w+)/.exec(className || '')
-                    const isInline = !match
-                    if (isInline) {
-                      return (
-                        <code
-                          className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[0.85em] text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200"
-                          {...props}
-                        >
-                          {children}
-                        </code>
-                      )
-                    }
-                    const code = String(children).replace(/\n$/, '')
-                    return <CodeBlock code={code} language={match![1]} />
-                  },
-                }}
+              // Narrow boundary: if this one message's markdown/syntax-highlighting
+              // throws (e.g. malformed AI output), only this bubble falls back to
+              // raw text -- the rest of the app (sidebar, composer, other messages)
+              // keeps working.
+              <ErrorBoundary
+                label="MessageBubble"
+                fallback={() => <RenderFallback content={message.content} />}
               >
-                {message.content || (isStreaming ? '...' : '')}
-              </ReactMarkdown>
+                <Suspense fallback={<MarkdownLoadingFallback />}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code({ className, children, ...props }) {
+                        const match = /language-(\w+)/.exec(className || '')
+                        const isInline = !match
+                        if (isInline) {
+                          return (
+                            <code
+                              className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[0.85em] text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200"
+                              {...props}
+                            >
+                              {children}
+                            </code>
+                          )
+                        }
+                        const code = String(children).replace(/\n$/, '')
+                        return (
+                          <Suspense fallback={<CodeBlockLoadingFallback />}>
+                            <CodeBlock code={code} language={match![1]} />
+                          </Suspense>
+                        )
+                      },
+                    }}
+                  >
+                    {message.content || (isStreaming ? '...' : '')}
+                  </ReactMarkdown>
+                </Suspense>
+              </ErrorBoundary>
             )}
           </div>
         )}
@@ -177,33 +197,32 @@ export function MessageBubble({ message, isStreaming, onRegenerate, onEdit }: Pr
   )
 }
 
-function CodeBlock({ code, language }: { code: string; language: string }) {
-  const [copied, setCopied] = useState(false)
-  const { theme } = useTheme()
+function MarkdownLoadingFallback() {
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-neutral-800 dark:border-neutral-700">
-      <div className="flex items-center justify-between bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 dark:bg-neutral-950">
-        <span className="font-mono">{language}</span>
-        <button
-          onClick={async () => {
-            await navigator.clipboard.writeText(code)
-            setCopied(true)
-            setTimeout(() => setCopied(false), 1500)
-          }}
-          aria-label="Copy code"
-          className="flex h-8 items-center gap-1 rounded px-1.5 transition-colors duration-150 hover:text-white"
-        >
-          {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
+    <div className="flex items-center gap-2 py-1 text-neutral-400">
+      <Spinner size={14} />
+    </div>
+  )
+}
+
+function CodeBlockLoadingFallback() {
+  return (
+    <div className="my-2 flex items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 p-4 dark:border-neutral-700">
+      <Spinner size={16} className="text-neutral-400" />
+    </div>
+  )
+}
+
+/** Shown in place of a single message's rendered markdown if rendering it threw. */
+function RenderFallback({ content }: { content: string }) {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-medium">
+        <AlertCircle size={12} /> Couldn't render this message
       </div>
-      <SyntaxHighlighter
-        language={language}
-        style={theme === 'dark' ? oneDark : oneLight}
-        customStyle={{ margin: 0, fontSize: '0.85em', background: theme === 'dark' ? '#0a0a0a' : '#fafafa' }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      <pre className="whitespace-pre-wrap break-words font-sans text-sm text-neutral-700 dark:text-neutral-300">
+        {content}
+      </pre>
     </div>
   )
 }

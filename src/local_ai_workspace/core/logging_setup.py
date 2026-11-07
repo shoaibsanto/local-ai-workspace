@@ -10,6 +10,7 @@ Called once from cli/main.py before uvicorn starts. Two concerns:
 2. Rotating file handler writing to `<data_root>/logs/application.log`, so
    logs persist across restarts without growing unboundedly.
 """
+
 from __future__ import annotations
 
 import logging
@@ -51,9 +52,7 @@ class RedactionFilter(logging.Filter):
                 if isinstance(record.args, dict):
                     record.args = {k: redact(v) if isinstance(v, str) else v for k, v in record.args.items()}
                 else:
-                    record.args = tuple(
-                        redact(a) if isinstance(a, str) else a for a in record.args
-                    )
+                    record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
         except Exception:  # noqa: BLE001 - redaction must never break logging
             pass
         return True
@@ -72,9 +71,7 @@ def configure_logging(level: str = "INFO") -> None:
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     file_handler.addFilter(redaction_filter)
 
     console_handler = logging.StreamHandler()

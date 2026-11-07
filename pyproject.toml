@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-ai-workspace"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first, Claude-inspired AI workspace with custom LLM providers and native MCP support"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Shoaib Santo" }]
 keywords = ["ai", "llm", "mcp", "chat", "local-first"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
@@ -34,7 +34,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "ruff>=0.7.0"]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
 
 [project.scripts]
 local-ai = "local_ai_workspace.cli.main:app"
@@ -42,3 +47,64 @@ local-ai = "local_ai_workspace.cli.main:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/local_ai_workspace"]
 artifacts = ["src/local_ai_workspace/static/**"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: pyflakes+pycodestyle core; I: import sorting; UP: pyupgrade (modern
+# syntax); B: bugbear (common footguns); SIM: simplify; C4: comprehensions.
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = [
+    "E501", # line length handled by ruff format, not worth failing CI over
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests commonly use asserts, long literal fixtures, and unused-looking
+# monkeypatch targets; relax a couple of rules that fight normal test style.
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+# Full `strict = true` forces return-type annotations on every function,
+# including every FastAPI route handler (`def foo():` is the idiomatic
+# style there — FastAPI infers the response shape from the return value /
+# response_model, not from a Python type annotation). Retrofitting ~70
+# handlers with annotations that add no real safety isn't worth it, so we
+# opt out of disallow_untyped_defs/disallow_incomplete_defs but keep
+# check_untyped_defs on so mypy still type-checks the *body* of every
+# function (this is what actually catches real bugs) and keep the other
+# strict-mode checks that matter: no silent Any returns, no unused ignores,
+# no implicit Optional.
+check_untyped_defs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# The MCP SDK ships no inline types/py.typed marker for several submodules
+# used here (mcp.client.auth.utils, mcp.shared.auth) and its public API
+# surface changes across versions faster than third-party stubs could keep
+# up — treat it as untyped rather than fighting constant stub drift.
+# follow_imports="skip" additionally stops mypy from chasing into the SDK's
+# own (partially typed, version-sensitive) internals: without it, minor
+# point-release renames inside `mcp` itself (e.g. isError -> is_error,
+# inputSchema -> input_schema) turn into spurious attr-defined errors here
+# that have nothing to do with bugs in *our* code.
+module = ["mcp.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# No type stubs published for these.
+module = ["keyring.*", "platformdirs.*"]
+ignore_missing_imports = true

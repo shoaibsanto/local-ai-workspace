@@ -10,11 +10,12 @@ come from an untrusted source (uploaded via the API), extraction is guarded
 against zip-slip: every member's resolved path must stay inside the data
 root, or the whole restore is aborted before anything is written.
 """
+
 from __future__ import annotations
 
 import logging
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from local_ai_workspace.storage.paths import backups_dir, get_data_root
@@ -27,7 +28,7 @@ def create_backup() -> Path:
     avoid backups-of-backups) into a new timestamped zip under backups/."""
     data_root = get_data_root()
     backup_dir = backups_dir()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     dest = backup_dir / f"backup-{timestamp}.zip"
 
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:

@@ -4,6 +4,7 @@ All writes are atomic (write to temp file + os.replace) so a crash mid-write
 never corrupts existing data — important since there's no database to fall
 back on.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,7 +24,7 @@ def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError:
         logger.warning("Corrupted JSON file, treating as missing: %s", path)
@@ -59,7 +60,7 @@ def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     records = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:

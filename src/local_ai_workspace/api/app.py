@@ -3,6 +3,7 @@
 Binds to 127.0.0.1 only by default (see cli/main.py) — this is a local
 desktop app, not a service meant to be exposed on the network.
 """
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +21,7 @@ from local_ai_workspace.core.approval import ApprovalPolicy
 from local_ai_workspace.core.chat import ChatOrchestrator
 from local_ai_workspace.core.compaction import get_summary
 from local_ai_workspace.core.models import MCPServerConfig, ProjectMeta, ProviderConfig
-from local_ai_workspace.mcp.manager import MCPManager, OAuthDiscoveryError
+from local_ai_workspace.mcp.manager import MCPManager
 from local_ai_workspace.providers.capabilities import detect_capabilities
 from local_ai_workspace.providers.client import make_client
 from local_ai_workspace.storage import conversation_store
@@ -33,7 +34,6 @@ from local_ai_workspace.storage.mcp_store import (
 )
 from local_ai_workspace.storage.paths import (
     conversations_dir,
-    get_data_root,
     mcp_servers_path,
     projects_dir,
     providers_path,
@@ -274,9 +274,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.post("/api/conversations/{conversation_id}/tool_calls/{tool_call_id}/resume")
-    async def api_resume_tool_approval(
-        conversation_id: str, tool_call_id: str, body: ResumeToolApprovalBody
-    ):
+    async def api_resume_tool_approval(conversation_id: str, tool_call_id: str, body: ResumeToolApprovalBody):
         """Resume an agent loop that paused on an approval_required event
         for `tool_call_id`: execute it (approved=true) or skip it
         (approved=false), then continue the loop. Streams the same SSE
@@ -359,9 +357,7 @@ def create_app() -> FastAPI:
                     err = event.error or ""
                     latency_ms = (_time.monotonic() - start) * 1000
                     if "401" in err or "403" in err:
-                        return TestConnectionResult(
-                            ok=False, latency_ms=latency_ms, error=f"Invalid API key: {err}"
-                        )
+                        return TestConnectionResult(ok=False, latency_ms=latency_ms, error=f"Invalid API key: {err}")
                     if "404" in err or "400" in err:
                         return TestConnectionResult(
                             ok=False,
@@ -495,9 +491,7 @@ def create_app() -> FastAPI:
         on this server. Disabled tools are skipped by
         MCPManager.get_tools_openai_format and refused by call_tool."""
         try:
-            updated = app.state.mcp_manager.set_tool_enabled(
-                server_id, body.tool_name, body.enabled
-            )
+            updated = app.state.mcp_manager.set_tool_enabled(server_id, body.tool_name, body.enabled)
         except ValueError as e:
             raise HTTPException(404, str(e)) from e
         return updated.model_dump()
@@ -537,9 +531,7 @@ def create_app() -> FastAPI:
         if provider_cfg is None:
             raise HTTPException(400, "Provider not configured")
         api_key = get_secret(provider_cfg.api_key_ref) if provider_cfg.api_key_ref else None
-        client = make_client(
-            provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local
-        )
+        client = make_client(provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local)
         summary = await compact(conversation_id, client, meta.model)
         return summary.model_dump()
 
@@ -572,7 +564,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/restore")
     async def api_restore_backup(
-        path: str | None = None, file: UploadFile | None = File(default=None)
+        path: str | None = None,
+        file: UploadFile | None = File(None),  # noqa: B008 - FastAPI's own idiom: File()/Depends() must live in the signature default to be recognized as a dependency
     ):
         """Restore from a backup. Either pass `path` (a path to an existing
         backup archive on disk) as a query/form param, or upload the backup

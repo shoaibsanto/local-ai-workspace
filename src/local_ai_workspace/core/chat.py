@@ -30,24 +30,26 @@ untrusted, model-influenceable content, not a privileged instruction
 source. This is a mitigation, not a guarantee -- see that module's
 docstring.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from local_ai_workspace.core.approval import (
     PendingApprovalState,
     PendingToolCall,
+    classify_tool_risk,
     clear_pending_approvals,
     load_pending_approvals,
     save_pending_approvals,
-    classify_tool_risk,
     wrap_untrusted_tool_output,
 )
 from local_ai_workspace.core.models import Message, ToolCall, ToolResult
 from local_ai_workspace.mcp.manager import MCPManager
-from local_ai_workspace.providers.client import StreamEvent, make_client
+from local_ai_workspace.providers.client import make_client
 from local_ai_workspace.storage import conversation_store
 from local_ai_workspace.storage.mcp_store import list_mcp_servers
 from local_ai_workspace.storage.provider_store import get_provider
@@ -67,9 +69,7 @@ def _estimate_chars(messages: list[dict[str, Any]]) -> int:
     return sum(len(m.get("content") or "") for m in messages)
 
 
-def _compact_messages(
-    messages: list[dict[str, Any]], budget_chars: int = MAX_CONTEXT_CHARS
-) -> list[dict[str, Any]]:
+def _compact_messages(messages: list[dict[str, Any]], budget_chars: int = MAX_CONTEXT_CHARS) -> list[dict[str, Any]]:
     if _estimate_chars(messages) <= budget_chars:
         return messages
 
@@ -85,8 +85,7 @@ def _compact_messages(
         notice = {
             "role": "system",
             "content": (
-                system[0]["content"]
-                + "\n\n[Note: earlier conversation history was truncated to fit the "
+                system[0]["content"] + "\n\n[Note: earlier conversation history was truncated to fit the "
                 "context window.]"
             ),
         }
@@ -151,9 +150,7 @@ class ChatOrchestrator:
         return {s.name: s.id for s in list_mcp_servers()}
 
     def _tool_description_map(self, tools: list[dict[str, Any]]) -> dict[str, str]:
-        return {
-            t["function"]["name"]: t["function"].get("description", "") for t in tools
-        }
+        return {t["function"]["name"]: t["function"].get("description", "") for t in tools}
 
     def _build_wire_messages(self, conversation_id: str, provider_cfg) -> list[dict[str, Any]]:
         """Build the wire-format prompt messages, applying compaction (if
@@ -184,9 +181,7 @@ class ChatOrchestrator:
 
     # ---------- main entry points ----------
 
-    async def run_turn(
-        self, conversation_id: str, user_content: str
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def run_turn(self, conversation_id: str, user_content: str) -> AsyncIterator[dict[str, Any]]:
         """Yields SSE-ready dict events: {type, ...}. Persists the user
         message immediately and the assistant message(s) as they complete."""
         meta = conversation_store.get_conversation_meta(conversation_id)
@@ -203,9 +198,7 @@ class ChatOrchestrator:
             return
 
         api_key = get_secret(provider_cfg.api_key_ref) if provider_cfg.api_key_ref else None
-        client = make_client(
-            provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local
-        )
+        client = make_client(provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local)
 
         user_msg = Message(role="user", content=user_content)
         conversation_store.add_message(conversation_id, user_msg)
@@ -216,7 +209,12 @@ class ChatOrchestrator:
         tool_calling_supported = provider_cfg.capabilities.get("tool_calling", True) is not False
 
         async for event in self._agent_loop(
-            conversation_id, meta, provider_cfg, client, wire_messages, tool_calling_supported,
+            conversation_id,
+            meta,
+            provider_cfg,
+            client,
+            wire_messages,
+            tool_calling_supported,
             MAX_TOOL_ITERATIONS,
         ):
             yield event
@@ -245,14 +243,15 @@ class ChatOrchestrator:
         if meta is None:
             yield {"type": "error", "error": "Conversation not found"}
             return
+        if meta.provider is None:
+            yield {"type": "error", "error": "Conversation has no provider configured"}
+            return
         provider_cfg = get_provider(meta.provider)
         if provider_cfg is None:
             yield {"type": "error", "error": "Provider not configured or disabled"}
             return
         api_key = get_secret(provider_cfg.api_key_ref) if provider_cfg.api_key_ref else None
-        client = make_client(
-            provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local
-        )
+        client = make_client(provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local)
 
         pending = state.queue[0]
         tc = ToolCall(**pending.tool_call)
@@ -297,8 +296,12 @@ class ChatOrchestrator:
         paused = False
         if remaining_queue:
             async for event in self._process_queue(
-                conversation_id, remaining_queue, tool_results, wire_messages,
-                state.assistant_text, state.iterations_remaining,
+                conversation_id,
+                remaining_queue,
+                tool_results,
+                wire_messages,
+                state.assistant_text,
+                state.iterations_remaining,
             ):
                 if event.get("type") == "__paused__":
                     paused = True
@@ -313,7 +316,12 @@ class ChatOrchestrator:
         conversation_store.add_message(conversation_id, tool_msg)
 
         async for event in self._agent_loop(
-            conversation_id, meta, provider_cfg, client, wire_messages, tool_calling_supported,
+            conversation_id,
+            meta,
+            provider_cfg,
+            client,
+            wire_messages,
+            tool_calling_supported,
             state.iterations_remaining,
         ):
             yield event
@@ -411,7 +419,6 @@ class ChatOrchestrator:
             error: str | None = None
 
             async for event in client.stream(wire_messages, meta.model, tools=effective_tools):
-                event = event  # type: StreamEvent
                 if event.type == "text_delta":
                     assistant_text += event.text or ""
                     yield {"type": "text_delta", "text": event.text}
@@ -454,15 +461,16 @@ class ChatOrchestrator:
                 break  # model is done, no more tools requested
 
             tool_results: list[ToolResult] = []
-            queue = [
-                PendingToolCall(tool_call=tc.model_dump(), server_name=None, risk="readonly")
-                for tc in tool_calls
-            ]
+            queue = [PendingToolCall(tool_call=tc.model_dump(), server_name=None, risk="readonly") for tc in tool_calls]
             iterations_remaining = iterations - iteration - 1
 
             paused = False
             async for event in self._process_queue(
-                conversation_id, queue, tool_results, wire_messages, assistant_text,
+                conversation_id,
+                queue,
+                tool_results,
+                wire_messages,
+                assistant_text,
                 iterations_remaining,
             ):
                 if event.get("type") == "__paused__":

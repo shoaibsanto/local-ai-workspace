@@ -8,6 +8,7 @@ Holds things that aren't tied to a single provider or MCP server:
 
 Stored as one JSON document at storage/paths.py's settings_path().
 """
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

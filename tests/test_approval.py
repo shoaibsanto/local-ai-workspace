@@ -1,15 +1,15 @@
 """Tests for the tool approval policy engine (core/approval.py)."""
+
 from __future__ import annotations
 
 import pytest
 
 from local_ai_workspace.core.approval import (
+    UNTRUSTED_TOOL_OUTPUT_MARKER,
     ApprovalPolicy,
     classify_tool_risk,
     wrap_untrusted_tool_output,
-    UNTRUSTED_TOOL_OUTPUT_MARKER,
 )
-
 
 # ---------- classify_tool_risk ----------
 
@@ -104,9 +104,7 @@ async def test_consequential_tool_pauses_agent_loop(monkeypatch, tmp_path):
     from local_ai_workspace.providers.client import StreamEvent
     from local_ai_workspace.storage import conversation_store, provider_store
 
-    provider = ProviderConfig(
-        name="P", base_url="https://example.invalid/v1", default_model="m", enabled=True
-    )
+    provider = ProviderConfig(name="P", base_url="https://example.invalid/v1", default_model="m", enabled=True)
     provider_store.save_provider(provider)
     meta = conversation_store.create_conversation(title="t", model="m", provider=provider.id)
 
@@ -177,9 +175,7 @@ async def test_readonly_tool_does_not_pause_agent_loop(monkeypatch, tmp_path):
     from local_ai_workspace.providers.client import StreamEvent
     from local_ai_workspace.storage import conversation_store, provider_store
 
-    provider = ProviderConfig(
-        name="P2", base_url="https://example.invalid/v1", default_model="m", enabled=True
-    )
+    provider = ProviderConfig(name="P2", base_url="https://example.invalid/v1", default_model="m", enabled=True)
     provider_store.save_provider(provider)
     meta = conversation_store.create_conversation(title="t", model="m", provider=provider.id)
 

@@ -10,8 +10,10 @@ storage from this package.
 This is process-lifetime state (live connections), not disk state — if the
 app restarts, servers are reconnected on startup via `connect_all_enabled`.
 """
+
 from __future__ import annotations
 
+import contextlib
 import logging
 from contextlib import AsyncExitStack
 from typing import Any
@@ -30,7 +32,7 @@ from mcp.shared.auth import OAuthClientMetadata, OAuthMetadata, ProtectedResourc
 
 from local_ai_workspace.core.models import MCPServerConfig
 from local_ai_workspace.core.ssrf_guard import validate_outbound_url
-from local_ai_workspace.mcp.oauth_flow import OAuthCallbackServer, make_redirect_handler
+from local_ai_workspace.mcp.oauth_flow import OAuthCallbackServer
 from local_ai_workspace.mcp.oauth_storage import EncryptedFileTokenStorage
 from local_ai_workspace.storage.mcp_store import get_mcp_server, list_mcp_servers, save_mcp_server
 
@@ -75,15 +77,12 @@ async def discover_oauth_requirement(url: str, allow_loopback: bool = False) -> 
                 try:
                     prm = ProtectedResourceMetadata.model_validate_json(resp.content)
                 except Exception as e:  # noqa: BLE001
-                    raise OAuthDiscoveryError(
-                        f"Invalid protected resource metadata at {prm_url}: {e}"
-                    ) from e
+                    raise OAuthDiscoveryError(f"Invalid protected resource metadata at {prm_url}: {e}") from e
                 break
             if resp.status_code == 404:
                 continue
             raise OAuthDiscoveryError(
-                f"Unexpected status {resp.status_code} discovering protected resource "
-                f"metadata at {prm_url}"
+                f"Unexpected status {resp.status_code} discovering protected resource metadata at {prm_url}"
             )
 
     if prm is None:
@@ -105,15 +104,11 @@ async def discover_oauth_requirement(url: str, allow_loopback: bool = False) -> 
                 try:
                     OAuthMetadata.model_validate_json(resp.content)
                 except Exception as e:  # noqa: BLE001
-                    raise OAuthDiscoveryError(
-                        f"Invalid authorization server metadata at {as_url}: {e}"
-                    ) from e
+                    raise OAuthDiscoveryError(f"Invalid authorization server metadata at {as_url}: {e}") from e
                 return True
             if 300 <= resp.status_code < 500:
                 continue
-            raise OAuthDiscoveryError(
-                f"Authorization server metadata request failed ({resp.status_code}) at {as_url}"
-            )
+            raise OAuthDiscoveryError(f"Authorization server metadata request failed ({resp.status_code}) at {as_url}")
 
     raise OAuthDiscoveryError(
         f"Protected resource metadata referenced authorization server {auth_server_url} "
@@ -146,7 +141,7 @@ class MCPManager:
         names, not qualified) are skipped entirely -- the model never even
         sees them as callable."""
         tools: list[dict[str, Any]] = []
-        for server_id, conn in self._connections.items():
+        for _server_id, conn in self._connections.items():
             disabled = set(conn.config.disabled_tools or [])
             for tool in conn.tools:
                 if tool["name"] in disabled:
@@ -213,9 +208,7 @@ class MCPManager:
             logger.exception("MCP tool call failed: %s", qualified_name)
             return f"Error calling tool '{qualified_name}': {e}"
 
-    def _mark_status(
-        self, config: MCPServerConfig, status: str, last_error: str | None
-    ) -> MCPServerConfig:
+    def _mark_status(self, config: MCPServerConfig, status: str, last_error: str | None) -> MCPServerConfig:
         updated = config.model_copy(update={"status": status, "last_error": last_error})
         save_mcp_server(updated)
         conn = self._connections.get(config.id)
@@ -244,14 +237,11 @@ class MCPManager:
             return self._mark_status(
                 config,
                 "needs_auth",
-                "OAuth access token expired and no refresh token is available; "
-                "reauthorization required.",
+                "OAuth access token expired and no refresh token is available; reauthorization required.",
             )
 
         if not config.url:
-            return self._mark_status(
-                config, "needs_auth", "OAuth-protected server has no url configured."
-            )
+            return self._mark_status(config, "needs_auth", "OAuth-protected server has no url configured.")
         provider = await self._build_oauth_provider(config)
         try:
             async with httpx.AsyncClient(auth=provider, timeout=15) as client:
@@ -283,9 +273,7 @@ class MCPManager:
             if config.transport == "stdio":
                 if not config.command:
                     raise ValueError("stdio transport requires a command")
-                params = StdioServerParameters(
-                    command=config.command, args=config.args, env=config.env or None
-                )
+                params = StdioServerParameters(command=config.command, args=config.args, env=config.env or None)
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif config.transport in ("sse", "streamable_http"):
                 if not config.url:
@@ -295,9 +283,7 @@ class MCPManager:
                 if config.requires_oauth:
                     auth = await self._build_oauth_provider(config)
                 if config.transport == "sse":
-                    read, write = await stack.enter_async_context(
-                        sse_client(config.url, auth=auth)
-                    )
+                    read, write = await stack.enter_async_context(sse_client(config.url, auth=auth))
                 else:
                     http_client = None
                     if auth is not None:
@@ -325,9 +311,7 @@ class MCPManager:
 
             self._connections[config.id] = ConnectedServer(config, session, stack)
 
-            updated = config.model_copy(
-                update={"status": "connected", "last_error": None, "tool_count": len(tools)}
-            )
+            updated = config.model_copy(update={"status": "connected", "last_error": None, "tool_count": len(tools)})
             self._connections[config.id].tools = tools
             save_mcp_server(updated)
             return updated
@@ -363,13 +347,9 @@ class MCPManager:
             if updated.status in ("connected", "needs_auth"):
                 return updated
             attempts.append(f"{transport}: {updated.last_error}")
-        raise RuntimeError(
-            "Could not connect via streamable_http or sse. " + " | ".join(attempts)
-        )
+        raise RuntimeError("Could not connect via streamable_http or sse. " + " | ".join(attempts))
 
-    async def quick_add(
-        self, name: str, url: str, description: str | None = None
-    ) -> tuple[MCPServerConfig, bool]:
+    async def quick_add(self, name: str, url: str, description: str | None = None) -> tuple[MCPServerConfig, bool]:
         """Quick-add flow: user supplies only name/url/description. We
         auto-detect transport (auto_connect) and auto-detect whether OAuth
         is required (discover_oauth_requirement) rather than asking the
@@ -468,10 +448,8 @@ class MCPManager:
     async def disconnect(self, server_id: str) -> None:
         conn = self._connections.pop(server_id, None)
         if conn:
-            try:
+            with contextlib.suppress(Exception):
                 await conn.stack.aclose()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def disconnect_all(self) -> None:
         for server_id in list(self._connections.keys()):

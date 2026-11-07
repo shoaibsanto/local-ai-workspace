@@ -17,6 +17,7 @@ don't match any known pattern, the right fix is to let the user hand-edit
 a provider's `capabilities` dict in the UI -- not to add a network call
 here.
 """
+
 from __future__ import annotations
 
 from local_ai_workspace.core.models import ProviderConfig

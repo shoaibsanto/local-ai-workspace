@@ -19,6 +19,7 @@ the summary + recent messages combination still goes through that same
 truncation as a final safety net in case it's still too large (e.g. a
 single huge recent message, or a summary that grew larger than expected).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -117,9 +118,7 @@ def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     return _estimate_chars(messages) // CHARS_PER_TOKEN
 
 
-def should_compact(
-    messages: list[dict[str, Any]], context_window: int, threshold: float = 0.75
-) -> bool:
+def should_compact(messages: list[dict[str, Any]], context_window: int, threshold: float = 0.75) -> bool:
     """True if `messages` are estimated to use >= `threshold` fraction of
     `context_window` tokens."""
     if context_window <= 0:
@@ -153,12 +152,9 @@ with exactly these keys:
 """
 
 
-def _build_summary_prompt(
-    existing: ConversationSummary | None, history_text: str
-) -> str:
+def _build_summary_prompt(existing: ConversationSummary | None, history_text: str) -> str:
     existing_block = (
-        f"Existing summary (update/extend this, don't discard still-relevant "
-        f"information):\n{existing.to_markdown()}"
+        f"Existing summary (update/extend this, don't discard still-relevant information):\n{existing.to_markdown()}"
         if existing is not None
         else "There is no existing summary yet -- this is the first compaction."
     )
@@ -170,12 +166,14 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     wrapped in markdown fences or have leading/trailing prose."""
     text = text.strip()
     try:
-        return json.loads(text)
+        parsed: dict[str, Any] = json.loads(text)
+        return parsed
     except json.JSONDecodeError:
         pass
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
-        return json.loads(match.group(0))
+        parsed = json.loads(match.group(0))
+        return parsed
     raise ValueError("No JSON object found in model response")
 
 
@@ -216,16 +214,12 @@ async def compact(
         return existing  # nothing new to fold in
 
     wire = _messages_to_wire_format(new_messages)
-    history_text = "\n".join(
-        f"[{m.get('role')}] {m.get('content') or ''}" for m in wire
-    )
+    history_text = "\n".join(f"[{m.get('role')}] {m.get('content') or ''}" for m in wire)
     prompt = _build_summary_prompt(existing, history_text)
 
     async def _call_model() -> str:
         text = ""
-        async for event in llm_client.stream(
-            [{"role": "user", "content": prompt}], model_name, tools=None
-        ):
+        async for event in llm_client.stream([{"role": "user", "content": prompt}], model_name, tools=None):
             if event.type == "text_delta":
                 text += event.text or ""
             elif event.type == "error":
@@ -248,7 +242,7 @@ async def compact(
         )
         _write_summary(conversation_id, summary)
         return summary
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Compaction timed out for conversation %s after %ss", conversation_id, timeout)
     except Exception as e:  # noqa: BLE001 - never let compaction crash the turn
         logger.error("Compaction failed for conversation %s: %s", conversation_id, e)

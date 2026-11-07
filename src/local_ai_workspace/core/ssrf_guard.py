@@ -16,6 +16,7 @@ common use case, so callers can pass `allow_loopback=True` to skip the
 check entirely for configs the user explicitly opted into treating as
 local/trusted (see ProviderConfig.allow_local / MCPServerConfig.allow_local).
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -38,14 +39,7 @@ def _is_blocked_ip(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return True  # unparsable -> treat as unsafe
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
 
 
 def validate_outbound_url(url: str, allow_loopback: bool = False) -> None:

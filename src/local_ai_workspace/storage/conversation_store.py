@@ -8,6 +8,7 @@ Reading a conversation's messages means reading the JSONL file top to
 bottom. Editing/deleting a message rewrites the file atomically (rare
 operation, conversations are small enough this is fine without an index).
 """
+
 from __future__ import annotations
 
 import shutil

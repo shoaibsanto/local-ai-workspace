@@ -1,6 +1,7 @@
 """Tests for the security/storage hardening work: SSRF guard, backup/restore
 round-trip, conversation export/import round-trip, and log redaction.
 """
+
 from __future__ import annotations
 
 import io
@@ -10,7 +11,6 @@ import socket
 import zipfile
 
 import pytest
-
 
 # ---------- SSRF guard ----------
 
