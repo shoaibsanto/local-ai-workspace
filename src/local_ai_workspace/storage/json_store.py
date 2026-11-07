@@ -7,19 +7,28 @@ back on.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 def read_json(path: Path, default: Any = None) -> Any:
+    """Read a JSON file, returning `default` (None unless overridden) if the
+    file is missing, unreadable, or corrupted (invalid JSON) rather than
+    raising — a single corrupted file should never crash the whole app."""
     if not path.exists():
         return default
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError:
+        logger.warning("Corrupted JSON file, treating as missing: %s", path)
+        return default
+    except OSError:
         return default
 
 
@@ -45,17 +54,20 @@ def append_jsonl(path: Path, record: dict) -> None:
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file, skipping (and warning about) any malformed lines
+    instead of aborting the whole read."""
     if not path.exists():
         return []
     records = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
+                logger.warning("Skipping malformed JSONL line %d in %s", lineno, path)
                 continue
     return records
 

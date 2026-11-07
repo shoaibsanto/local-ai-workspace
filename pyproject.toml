@@ -30,6 +30,7 @@ dependencies = [
     "sse-starlette>=2.1.0",
     "platformdirs>=4.3.0",
     "aiohttp>=3.10.0",
+    "keyring>=25.0.0",
 ]
 
 [project.optional-dependencies]

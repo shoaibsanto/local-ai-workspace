@@ -10,28 +10,48 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from local_ai_workspace.core.approval import ApprovalPolicy
 from local_ai_workspace.core.chat import ChatOrchestrator
+from local_ai_workspace.core.compaction import get_summary
 from local_ai_workspace.core.models import MCPServerConfig, ProjectMeta, ProviderConfig
-from local_ai_workspace.mcp.manager import MCPManager
+from local_ai_workspace.mcp.manager import MCPManager, OAuthDiscoveryError
+from local_ai_workspace.providers.capabilities import detect_capabilities
+from local_ai_workspace.providers.client import make_client
 from local_ai_workspace.storage import conversation_store
+from local_ai_workspace.storage.backup import create_backup, restore_backup
 from local_ai_workspace.storage.mcp_store import (
     delete_mcp_server,
     get_mcp_server,
     list_mcp_servers,
     save_mcp_server,
 )
+from local_ai_workspace.storage.paths import (
+    conversations_dir,
+    get_data_root,
+    mcp_servers_path,
+    projects_dir,
+    providers_path,
+    secret_key_path,
+    secrets_path,
+)
 from local_ai_workspace.storage.provider_store import (
     delete_provider,
+    get_provider,
     list_providers,
     save_provider,
     seed_default_providers,
 )
-from local_ai_workspace.storage.secrets import delete_secret, set_secret
+from local_ai_workspace.storage.secrets import delete_secret, get_secret, set_secret
+from local_ai_workspace.storage.settings_store import (
+    get_approval_policy,
+    save_approval_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +79,66 @@ class SetProviderKeyBody(BaseModel):
     api_key: str
 
 
+class TestConnectionResult(BaseModel):
+    ok: bool
+    latency_ms: float | None = None
+    error: str | None = None
+    model: str | None = None
+
+
 class ChatBody(BaseModel):
     content: str
+
+
+class RestoreBackupBody(BaseModel):
+    path: str
+
+
+class ImportConversationBody(BaseModel):
+    meta: dict
+    messages: list[dict] = []
+
+
+class WipeBody(BaseModel):
+    confirm: bool = False
+
+
+class QuickAddMCPServerBody(BaseModel):
+    name: str
+    url: str
+    description: str | None = None
+
+
+class ToggleToolBody(BaseModel):
+    tool_name: str
+    enabled: bool
+
+
+class ResumeToolApprovalBody(BaseModel):
+    approved: bool
+
+
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1",
+    "http://localhost",
+    "https://127.0.0.1",
+    "https://localhost",
+}
+
+
+def _origin_is_allowed(origin: str) -> bool:
+    """True if `origin` is an http(s) origin on 127.0.0.1 or localhost
+    (any port). Used both by the CSRF-style origin check middleware and to
+    build the CORS allow-list."""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(origin)
+    except Exception:  # noqa: BLE001
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    return parsed.hostname in ("127.0.0.1", "localhost")
 
 
 @asynccontextmanager
@@ -75,6 +153,32 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Local AI Workspace", lifespan=lifespan)
+
+    # ---------- Origin / CSRF protection ----------
+    # Reject any non-GET request whose Origin header (when present) isn't an
+    # http(s) origin on 127.0.0.1/localhost. Prevents a malicious website
+    # from using the user's browser (with its ambient trust / cookies) to
+    # make state-changing requests against this local API.
+    @app.middleware("http")
+    async def reject_cross_origin_mutations(request: Request, call_next):
+        if request.method != "GET":
+            origin = request.headers.get("origin")
+            if origin and not _origin_is_allowed(origin):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": f"Cross-origin request blocked (Origin: {origin})"},
+                )
+        return await call_next(request)
+
+    # Explicit CORS allow-list -- no wildcard. Only the local UI (served from
+    # 127.0.0.1/localhost at any port) is allowed to make cross-origin calls.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["*"],
+    )
 
     # ---------- Conversations ----------
 
@@ -143,6 +247,18 @@ def create_app() -> FastAPI:
         conversation_store.replace_messages(conversation_id, truncated)
         return {"ok": True, "resend_content": last_user_content}
 
+    @app.get("/api/conversations/{conversation_id}/export")
+    def api_export_conversation(conversation_id: str):
+        data = conversation_store.export_conversation(conversation_id)
+        if data is None:
+            raise HTTPException(404, "Conversation not found")
+        return data
+
+    @app.post("/api/conversations/import")
+    def api_import_conversation(body: ImportConversationBody):
+        new_meta = conversation_store.import_conversation(body.model_dump())
+        return new_meta.model_dump()
+
     # ---------- Chat streaming (SSE) ----------
 
     @app.post("/api/conversations/{conversation_id}/chat")
@@ -152,6 +268,23 @@ def create_app() -> FastAPI:
 
         async def event_stream():
             async for event in orchestrator.run_turn(conversation_id, content):
+                yield f"data: {json.dumps(event)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.post("/api/conversations/{conversation_id}/tool_calls/{tool_call_id}/resume")
+    async def api_resume_tool_approval(
+        conversation_id: str, tool_call_id: str, body: ResumeToolApprovalBody
+    ):
+        """Resume an agent loop that paused on an approval_required event
+        for `tool_call_id`: execute it (approved=true) or skip it
+        (approved=false), then continue the loop. Streams the same SSE
+        event shapes as /chat."""
+        orchestrator: ChatOrchestrator = app.state.orchestrator
+
+        async def event_stream():
+            async for event in orchestrator.resume_turn(conversation_id, tool_call_id, body.approved):
                 yield f"data: {json.dumps(event)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -186,6 +319,71 @@ def create_app() -> FastAPI:
         if not delete_provider(provider_id):
             raise HTTPException(404, "Provider not found")
         return {"ok": True}
+
+    @app.post("/api/providers/{provider_id}/detect_capabilities")
+    def api_detect_provider_capabilities(provider_id: str):
+        provider = get_provider(provider_id)
+        if provider is None:
+            raise HTTPException(404, "Provider not found")
+        capabilities = detect_capabilities(provider)
+        updated = provider.model_copy(update={"capabilities": capabilities})
+        saved = save_provider(updated)
+        return saved.model_dump()
+
+    @app.post("/api/providers/{provider_id}/test_connection")
+    async def api_test_provider_connection(provider_id: str) -> TestConnectionResult:
+        """Send a minimal, cheap completion request through the provider's
+        configured client and report whether it actually works. Distinguishes
+        invalid-auth, network, timeout, and unsupported-model failures so the
+        UI can show something more useful than a generic "failed"."""
+        import time as _time
+
+        import httpx as _httpx
+
+        provider = get_provider(provider_id)
+        if provider is None:
+            raise HTTPException(404, "Provider not found")
+
+        model = provider.default_model or (provider.models[0] if provider.models else None)
+        if not model:
+            return TestConnectionResult(ok=False, error="No model configured for this provider")
+
+        api_key = get_secret(provider.api_key_ref) if provider.api_key_ref else None
+        client = make_client(provider.kind, provider.base_url, api_key, allow_local=provider.allow_local)
+
+        probe_messages = [{"role": "user", "content": "ping"}]
+        start = _time.monotonic()
+        try:
+            async for event in client.stream(probe_messages, model, tools=None):
+                if event.type == "error":
+                    err = event.error or ""
+                    latency_ms = (_time.monotonic() - start) * 1000
+                    if "401" in err or "403" in err:
+                        return TestConnectionResult(
+                            ok=False, latency_ms=latency_ms, error=f"Invalid API key: {err}"
+                        )
+                    if "404" in err or "400" in err:
+                        return TestConnectionResult(
+                            ok=False,
+                            latency_ms=latency_ms,
+                            error=f"Unsupported model or bad request: {err}",
+                            model=model,
+                        )
+                    return TestConnectionResult(ok=False, latency_ms=latency_ms, error=err)
+                if event.type in ("text_delta", "done"):
+                    latency_ms = (_time.monotonic() - start) * 1000
+                    return TestConnectionResult(ok=True, latency_ms=latency_ms, model=model)
+            latency_ms = (_time.monotonic() - start) * 1000
+            return TestConnectionResult(ok=True, latency_ms=latency_ms, model=model)
+        except _httpx.TimeoutException as e:
+            latency_ms = (_time.monotonic() - start) * 1000
+            return TestConnectionResult(ok=False, latency_ms=latency_ms, error=f"Timeout: {e}")
+        except _httpx.HTTPError as e:
+            latency_ms = (_time.monotonic() - start) * 1000
+            return TestConnectionResult(ok=False, latency_ms=latency_ms, error=f"Network error: {e}")
+        except Exception as e:  # pragma: no cover - defensive catch-all
+            latency_ms = (_time.monotonic() - start) * 1000
+            return TestConnectionResult(ok=False, latency_ms=latency_ms, error=str(e))
 
     # ---------- Projects ----------
 
@@ -251,6 +449,59 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "MCP server not found")
         return {"ok": True}
 
+    @app.post("/api/mcp/servers/quick_add")
+    async def api_quick_add_mcp_server(body: QuickAddMCPServerBody):
+        """Quick-add flow: caller supplies only name/url/description. We
+        auto-detect transport (streamable_http first, sse fallback) and
+        auto-detect whether OAuth is required via well-known metadata
+        discovery -- no manual checkbox needed. oauth_autodetect_failed is
+        true only when discovery genuinely failed, signaling the client UI
+        to fall back to asking the user to specify OAuth manually."""
+        try:
+            updated, oauth_detection_failed = await app.state.mcp_manager.quick_add(
+                body.name, body.url, body.description
+            )
+        except RuntimeError as e:
+            raise HTTPException(502, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {
+            "server": updated.model_dump(),
+            "oauth_autodetect_failed": oauth_detection_failed,
+        }
+
+    @app.post("/api/mcp/servers/{server_id}/reauthorize")
+    async def api_reauthorize_mcp_server(server_id: str):
+        """Clear the stored OAuth token and re-run the OAuth flow from
+        scratch (drives a fresh browser-based authorization on connect)."""
+        try:
+            updated = await app.state.mcp_manager.reauthorize(server_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+        return updated.model_dump()
+
+    @app.post("/api/mcp/servers/{server_id}/revoke_token")
+    async def api_revoke_mcp_token(server_id: str):
+        """Delete the stored OAuth token (and any client registration) for
+        this server without removing the server config itself."""
+        updated = await app.state.mcp_manager.revoke_oauth_token(server_id)
+        if updated is None:
+            raise HTTPException(404, "MCP server not found")
+        return updated.model_dump()
+
+    @app.put("/api/mcp/servers/{server_id}/tools/toggle")
+    async def api_toggle_mcp_tool(server_id: str, body: ToggleToolBody):
+        """Enable/disable a single tool (server-local name, not qualified)
+        on this server. Disabled tools are skipped by
+        MCPManager.get_tools_openai_format and refused by call_tool."""
+        try:
+            updated = app.state.mcp_manager.set_tool_enabled(
+                server_id, body.tool_name, body.enabled
+            )
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+        return updated.model_dump()
+
     @app.get("/api/mcp/tools")
     def api_list_mcp_tools():
         return app.state.mcp_manager.get_tools_openai_format()
@@ -258,6 +509,134 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def api_health():
         return {"status": "ok"}
+
+    # ---------- Approval policy (Feature B) ----------
+
+    @app.get("/api/settings/approval_policy")
+    def api_get_approval_policy():
+        return get_approval_policy().model_dump()
+
+    @app.put("/api/settings/approval_policy")
+    def api_put_approval_policy(body: ApprovalPolicy):
+        return save_approval_policy(body).model_dump()
+
+    # ---------- Context compaction (Feature C) ----------
+
+    @app.post("/api/conversations/{conversation_id}/compact")
+    async def api_trigger_compaction(conversation_id: str):
+        """Manually trigger compaction for a conversation. Uses the
+        conversation's configured provider/model to generate the summary."""
+        from local_ai_workspace.core.compaction import compact
+
+        meta = conversation_store.get_conversation_meta(conversation_id)
+        if meta is None:
+            raise HTTPException(404, "Conversation not found")
+        if not meta.provider or not meta.model:
+            raise HTTPException(400, "Conversation has no provider/model configured")
+        provider_cfg = get_provider(meta.provider)
+        if provider_cfg is None:
+            raise HTTPException(400, "Provider not configured")
+        api_key = get_secret(provider_cfg.api_key_ref) if provider_cfg.api_key_ref else None
+        client = make_client(
+            provider_cfg.kind, provider_cfg.base_url, api_key, allow_local=provider_cfg.allow_local
+        )
+        summary = await compact(conversation_id, client, meta.model)
+        return summary.model_dump()
+
+    @app.get("/api/conversations/{conversation_id}/summary")
+    def api_get_conversation_summary(conversation_id: str):
+        """View the current persisted structured summary for a
+        conversation, if compaction has ever run for it."""
+        summary = get_summary(conversation_id)
+        if summary is None:
+            raise HTTPException(404, "No summary exists for this conversation yet")
+        return summary.model_dump()
+
+    @app.get("/api/conversations/{conversation_id}/raw_messages")
+    def api_get_raw_messages(conversation_id: str):
+        """The full original message list for this conversation, straight
+        from messages.jsonl -- proof that compaction never destructively
+        drops anything from disk, regardless of what's been summarized."""
+        meta = conversation_store.get_conversation_meta(conversation_id)
+        if meta is None:
+            raise HTTPException(404, "Conversation not found")
+        messages = conversation_store.get_messages(conversation_id)
+        return [m.model_dump() for m in messages]
+
+    # ---------- Backup / restore ----------
+
+    @app.post("/api/admin/backup")
+    def api_create_backup():
+        path = create_backup()
+        return {"path": str(path)}
+
+    @app.post("/api/admin/restore")
+    async def api_restore_backup(
+        path: str | None = None, file: UploadFile | None = File(default=None)
+    ):
+        """Restore from a backup. Either pass `path` (a path to an existing
+        backup archive on disk) as a query/form param, or upload the backup
+        zip as `file`."""
+        if file is not None:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(await file.read())
+                tmp_path = tmp.name
+            try:
+                restored = restore_backup(tmp_path)
+            except (FileNotFoundError, ValueError) as e:
+                raise HTTPException(400, str(e)) from e
+            finally:
+                import os as _os
+
+                _os.unlink(tmp_path)
+            return {"ok": True, "files_restored": restored}
+
+        if path is None:
+            raise HTTPException(400, "Either 'path' or an uploaded 'file' is required")
+        try:
+            restored = restore_backup(path)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True, "files_restored": restored}
+
+    # ---------- Admin: clear all data ----------
+
+    @app.post("/api/admin/wipe")
+    def api_wipe_all_data(body: WipeBody):
+        """Delete all conversations, projects, providers, MCP server configs,
+        and secrets. Requires explicit confirm=true in the request body --
+        never deletes without it."""
+        if not body.confirm:
+            raise HTTPException(400, "Refusing to wipe data without confirm=true")
+
+        import shutil as _shutil
+
+        if conversations_dir().exists():
+            _shutil.rmtree(conversations_dir())
+            conversations_dir()  # recreate empty
+        if projects_dir().exists():
+            _shutil.rmtree(projects_dir())
+            projects_dir()
+        if providers_path().exists():
+            providers_path().unlink()
+        if mcp_servers_path().exists():
+            mcp_servers_path().unlink()
+        if secrets_path().exists():
+            secrets_path().unlink()
+        if secret_key_path().exists():
+            secret_key_path().unlink()
+        try:
+            from local_ai_workspace.storage import keyring_backend as _keyring_backend
+
+            _keyring_backend.delete_key()
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+
+        return {"ok": True}
 
     # ---------- Frontend static files (production) ----------
 

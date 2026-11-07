@@ -1,11 +1,19 @@
 @import "tailwindcss";
 
+/* Tailwind v4: enable `dark:` variant driven by a `.dark` class on <html>
+   (instead of only prefers-color-scheme media query). */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 :root {
   color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
 }
 
 html, body, #root {
@@ -16,6 +24,12 @@ body {
   margin: 0;
   background-color: #faf9f7;
   color: #1f1b16;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+html.dark body {
+  background-color: #17140f;
+  color: #ece7dd;
 }
 
 * {
@@ -32,6 +46,12 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #c2bcb1;
+}
+html.dark ::-webkit-scrollbar-thumb {
+  background: #3a352c;
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #4a443a;
 }
 
 .prose-chat pre {
@@ -53,4 +73,43 @@ body {
 .prose-chat ul, .prose-chat ol {
   margin: 0 0 0.75em 0;
   padding-left: 1.5em;
+}
+
+/* Simple fade+scale transition for modal open/close */
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-modal-in {
+  animation: modal-in 150ms ease-out;
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-overlay-in {
+  animation: overlay-in 150ms ease-out;
+}
+
+@keyframes drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.animate-drawer-in {
+  animation: drawer-in 200ms ease-out;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.9; }
+}
+.animate-skeleton {
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
 }

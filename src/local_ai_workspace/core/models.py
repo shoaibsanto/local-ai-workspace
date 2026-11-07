@@ -68,8 +68,30 @@ class ProviderConfig(BaseModel):
     api_key_ref: str | None = None  # key name in the encrypted secrets store
     default_model: str | None = None
     models: list[str] = Field(default_factory=list)
-    kind: Literal["openai_compatible", "anthropic"] = "openai_compatible"
+    kind: Literal["openai_compatible", "anthropic", "gemini"] = "openai_compatible"
     enabled: bool = True
+
+    # --- extended provider metadata ---
+    organization_id: str | None = None  # e.g. OpenAI org/project header
+    custom_headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: float = 60.0
+    # Known/detected feature support for this provider+model combo. Keys left
+    # unset mean "unknown", not "false" -- see providers/capabilities.py and
+    # core/chat.py for how callers are expected to treat that distinction.
+    capabilities: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "streaming": False,
+            "tool_calling": False,
+            "vision": False,
+            "structured_output": False,
+        }
+    )
+    context_window: int | None = None
+    # Whether this provider is allowed to target localhost/private network
+    # addresses (SSRF guard). Defaults to False; local providers like Ollama
+    # must opt in explicitly. Shared with the SSRF-hardening work elsewhere
+    # in the codebase -- reused here, not redefined.
+    allow_local: bool = False
 
 
 class MCPServerConfig(BaseModel):
@@ -88,3 +110,7 @@ class MCPServerConfig(BaseModel):
     )
     last_error: str | None = None
     tool_count: int = 0
+    allow_local: bool = False  # opt-in: skip SSRF guard for local MCP endpoints
+    # Server-local tool names (NOT qualified with "servername__") that the
+    # user has disabled. MCPManager.get_tools_openai_format skips these.
+    disabled_tools: list[str] = Field(default_factory=list)

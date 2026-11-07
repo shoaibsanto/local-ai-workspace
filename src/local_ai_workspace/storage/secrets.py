@@ -13,17 +13,54 @@ No secret ever leaves the machine and no secret is logged.
 """
 from __future__ import annotations
 
+import logging
 import os
 import stat
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from local_ai_workspace.storage import keyring_backend
 from local_ai_workspace.storage.json_store import read_json, write_json_atomic
 from local_ai_workspace.storage.paths import secret_key_path, secrets_path
 
+logger = logging.getLogger(__name__)
+
 
 def _get_or_create_key() -> bytes:
+    """Resolve the Fernet master key.
+
+    Preference order: OS keyring (Keychain/Credential Manager/libsecret) if
+    available, else the existing file-based key at `secret_key_path()`. If a
+    key already exists in the file but not the keyring (e.g. upgrading from
+    a version without keyring support), it's migrated into the keyring on a
+    best-effort basis. Any keyring failure (headless Linux with no secret
+    service, etc.) is caught and we transparently fall back to the file.
+    """
+    if keyring_backend.is_keyring_available():
+        existing = keyring_backend.get_key()
+        if existing is not None:
+            logger.info("Using master key from OS keyring (%s)", keyring_backend.backend_description())
+            return existing
+
+        key_path = secret_key_path()
+        if key_path.exists():
+            # Migrate the existing file-based key into the keyring.
+            key = key_path.read_bytes()
+            if keyring_backend.set_key(key):
+                logger.info(
+                    "Migrated master key into OS keyring (%s)",
+                    keyring_backend.backend_description(),
+                )
+            return key
+
+        key = Fernet.generate_key()
+        if keyring_backend.set_key(key):
+            logger.info("Generated new master key, stored in OS keyring (%s)", keyring_backend.backend_description())
+            return key
+        logger.warning("Keyring write failed; falling back to file-based key storage")
+
+    logger.info("Using file-based master key storage (OS keyring unavailable)")
     key_path = secret_key_path()
     if key_path.exists():
         return key_path.read_bytes()

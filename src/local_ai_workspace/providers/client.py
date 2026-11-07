@@ -21,6 +21,7 @@ import httpx
 from pydantic import BaseModel
 
 from local_ai_workspace.core.models import ToolCall
+from local_ai_workspace.core.ssrf_guard import validate_outbound_url
 
 
 class StreamEvent(BaseModel):
@@ -37,9 +38,10 @@ class ProviderError(Exception):
 
 
 class OpenAICompatibleClient:
-    def __init__(self, base_url: str, api_key: str | None):
+    def __init__(self, base_url: str, api_key: str | None, allow_local: bool = False):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.allow_local = allow_local
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -48,6 +50,7 @@ class OpenAICompatibleClient:
         return headers
 
     async def list_models(self) -> list[str]:
+        validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(f"{self.base_url}/models", headers=self._headers())
             resp.raise_for_status()
@@ -73,6 +76,7 @@ class OpenAICompatibleClient:
         pending_tool_calls: dict[int, dict[str, Any]] = {}
 
         try:
+            validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                     "POST",
@@ -144,9 +148,10 @@ class OpenAICompatibleClient:
 
 
 class AnthropicClient:
-    def __init__(self, base_url: str, api_key: str | None):
+    def __init__(self, base_url: str, api_key: str | None, allow_local: bool = False):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.allow_local = allow_local
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -156,6 +161,7 @@ class AnthropicClient:
         }
 
     async def list_models(self) -> list[str]:
+        validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(f"{self.base_url}/models", headers=self._headers())
             resp.raise_for_status()
@@ -197,6 +203,7 @@ class AnthropicClient:
 
         current_tool: dict[str, Any] | None = None
         try:
+            validate_outbound_url(self.base_url, allow_loopback=self.allow_local)
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                     "POST",
@@ -264,7 +271,13 @@ class AnthropicClient:
             yield StreamEvent(type="error", error=str(e))
 
 
-def make_client(kind: str, base_url: str, api_key: str | None):
+def make_client(kind: str, base_url: str, api_key: str | None, allow_local: bool = False):
     if kind == "anthropic":
-        return AnthropicClient(base_url, api_key)
-    return OpenAICompatibleClient(base_url, api_key)
+        return AnthropicClient(base_url, api_key, allow_local=allow_local)
+    if kind == "gemini":
+        # Imported lazily to avoid a hard import-time dependency cycle
+        # between providers/client.py and providers/gemini.py.
+        from local_ai_workspace.providers.gemini import GeminiClient
+
+        return GeminiClient(base_url, api_key, allow_local=allow_local)
+    return OpenAICompatibleClient(base_url, api_key, allow_local=allow_local)

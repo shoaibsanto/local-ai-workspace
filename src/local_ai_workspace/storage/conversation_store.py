@@ -114,3 +114,58 @@ def search_conversations(query: str) -> list[ConversationMeta]:
         if any(query_lower in m.content.lower() for m in messages):
             matches.append(meta)
     return matches
+
+
+def export_conversation(conversation_id: str) -> dict | None:
+    """Return a single JSON-serializable document containing a conversation's
+    meta and full message history, or None if it doesn't exist. Suitable for
+    writing straight to a file or returning from an API endpoint."""
+    meta = get_conversation_meta(conversation_id)
+    if meta is None:
+        return None
+    messages = get_messages(conversation_id)
+    return {
+        "meta": meta.model_dump(),
+        "messages": [m.model_dump() for m in messages],
+    }
+
+
+def import_conversation(data: dict) -> ConversationMeta:
+    """Create a brand-new conversation from a previously exported document.
+
+    Always allocates a new conversation id (and new message ids) -- an
+    import NEVER overwrites an existing conversation, even if the source
+    document's id happens to collide with one already on disk.
+    """
+    meta_data = dict(data.get("meta") or {})
+    # Drop the original id/timestamps so defaults mint fresh ones.
+    meta_data.pop("id", None)
+    meta_data.pop("created_at", None)
+    meta_data.pop("updated_at", None)
+    meta_data.pop("message_count", None)
+
+    new_meta = ConversationMeta(
+        title=meta_data.get("title", "Imported Conversation"),
+        project_id=meta_data.get("project_id"),
+        model=meta_data.get("model"),
+        provider=meta_data.get("provider"),
+    )
+    if meta_data.get("pinned"):
+        new_meta = new_meta.model_copy(update={"pinned": True})
+
+    write_json_atomic(_meta_path(new_meta.id), new_meta.model_dump())
+
+    raw_messages = data.get("messages") or []
+    imported_messages: list[Message] = []
+    for raw in raw_messages:
+        raw = dict(raw)
+        raw.pop("id", None)  # mint a fresh message id too
+        imported_messages.append(Message(**raw))
+
+    if imported_messages:
+        rewrite_jsonl_atomic(_messages_path(new_meta.id), [m.model_dump() for m in imported_messages])
+        updated = update_conversation_meta(new_meta.id, message_count=len(imported_messages))
+        if updated is not None:
+            new_meta = updated
+
+    return new_meta
